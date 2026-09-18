@@ -1,0 +1,4 @@
+-- 初始化扩展（docs/05-database-schema.md §3.0）
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;

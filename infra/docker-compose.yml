@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nda-postgres
+    environment:
+      POSTGRES_USER: nda
+      POSTGRES_PASSWORD: nda
+      POSTGRES_DB: nda
+    ports:
+      - "5433:5432"
+    volumes:
+      - nda-pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nda -d nda"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: nda-redis
+    # 宿主机 6380，避免与本地已有 redis 冲突
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: nda-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: nda
+      MINIO_ROOT_PASSWORD: nda123456
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - nda-minio-data:/data
+
+volumes:
+  nda-pgdata:
+  nda-minio-data:

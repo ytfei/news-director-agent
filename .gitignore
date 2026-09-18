@@ -1,0 +1,75 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 环境变量（含真实凭据，绝不入库） ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- 测试与缓存 ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+.turbo/
+*.tsbuildinfo
+
+# ---- 构建产物 ----
+dist/
+build/
+out/
+.next/
+.svelte-kit/
+
+# ---- 数据库 ----
+*.sqlite3
+*.db
+pgdata/
+
+# ---- 日志与临时文件 ----
+*.log
+logs/
+tmp/
+temp/
+.DS_Store
+Thumbs.db
+
+# ---- IDE ----
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# ---- 本地数据卷 ----
+infra/pgdata/
+infra/minio-data/

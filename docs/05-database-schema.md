@@ -1158,7 +1158,15 @@ ORDER BY hamming LIMIT 20;
 ```python
 # 维度：由配置决定，不做硬编码假设（Spike #4 定模型后再固定）
 EMBEDDING_DIM = 1024          # BGE-M3 / Qwen3-Embedding-1024
+# 当前开发环境实际为 2048（EMBEDDING_PROVIDER=volcengine / doubao-embedding-vision）
 # 变更维度 = 重建全部 HNSW 索引：news_items / news_clusters / opinions / user_style_profiles
+
+# ★ 硬限制（真机验证，2026-09-18）：pgvector 的 HNSW / IVFFlat 索引最多 2000 维。
+#   EMBEDDING_DIM > 2000 时建索引会直接报
+#   "column cannot have more than 2000 dimensions for hnsw index"。
+#   处理：迁移中条件化创建（见 alembic/versions/c6fca63ba48f），超限时走全表扫描，
+#   或先把 embedding 降到 <= 2000 维（Matryoshka / PCA）再入库。
+VECTOR_INDEX_MAX_DIM = 2000
 
 # canonical JSON：jsonb 序列化顺序不确定，必须先规范化再 hash，否则 ODS 幂等失效
 def canonical_json(payload: dict) -> str:

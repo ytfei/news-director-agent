@@ -297,6 +297,32 @@ class TushareNewsConnector(DataSourceConnector):
         ...
 ```
 
+#### 4.4.1 Spike #1 实测结论（2026-09-18，已验证）
+
+用当前 token 真机跑全部资讯接口，结果如下。**这是 M1 必须知道的事实**：
+
+| 接口 | 实测 | 说明 |
+| --- | --- | --- |
+| `news`（快讯） | ⚠️ **返回 0 行，不报错** | 最危险的一类：会造成"同步成功但 0 条"的假象 |
+| `major_news` | ✅ 可用（800 条/天量级） | 长篇通讯，字段 `title / pub_time / src / url` |
+| `cctv_news` | ✅ 可用（14 条/天） | 参数是 `date=YYYYMMDD`，**不是** start_date/end_date |
+| `anns_d` | ❌ 无权限 | 明确抛"没有接口访问权限" |
+| `npr` | ❌ 无权限 | 同上 |
+| `research_report` | ❌ 无权限 | 同上 |
+| `trade_cal` / `daily` | ✅ 可用 | 行情类不受限 |
+
+**由此确定的三条工程规则（已落在代码里）**：
+
+1. **`validate()` 必须逐个探测接口权限**，而不是等主查询失败 —— `probe_endpoints()` 已实现，
+   结果写入 `source_connectors.config.probe`，UI 可直接渲染"当前 token 无 XX 接口权限"。
+2. **只跑已探测可用的接口** —— `fetch()` 与 `available_endpoints` 取交集，不在无权限接口上浪费积分。
+3. **同步结果为空必须给出原因** —— `empty_reason()` 区分「所选接口无权限 / 区间无数据 / 非交易日」，
+   否则用户会以为系统坏了（见 `03-user-flow.md` 步骤① 失败处理表）。
+
+> 影响：M1 的实际数据源是 `major_news` + `cctv_news`；
+> 公告 / 政策 / 研报三类素材需要更高积分的 token 或改用其他数据源（RSS / 交易所）。
+> 这正是"数据源可插拔"存在的意义。
+
 ### 4.5 同步调度
 
 ```python
@@ -869,7 +895,8 @@ gantt
 
 ### 技术风险前置验证（Spike，各 1~2 天）
 
-1. **tushare 资讯接口权限与数据质量真机验证** —— 先跑 `news` / `major_news` / `anns_d`，确认字段、时间范围、限流阈值。
+1. ~~**tushare 资讯接口权限与数据质量真机验证**~~ —— ✅ **已完成**（2026-09-18），结论见 §4.4.1：
+   `news` 静默返回 0、`anns_d`/`npr`/`research_report` 无权限、`major_news`/`cctv_news`/行情类可用。
 2. **LangGraph interrupt + Postgres checkpointer 端到端验证** —— HITL 是核心体验，必须最先验证。
    **且必须验证"interrupt 后 arq job 结束、resume 起新 job"这条路径**（见 §5.4）。
 3. **deepagents 虚拟文件系统在后端（非内存）下的持久化验证** —— 决定长文写作能否断点续跑。
