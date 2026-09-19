@@ -1,6 +1,6 @@
 # TODO · 主理人 Agent
 
-> 状态：**M1 · 数据底座 —— 后端已跑通真机链路，前端未开始**
+> 状态：**M1 · 数据底座 —— 后端真机链路跑通，前端资讯流页面已交付**
 > 最后更新：2026-09-19
 > 相关文档：`docs/01`~`docs/05`
 
@@ -19,6 +19,9 @@
 | 资讯与数据源 REST API | ✅ |
 | 真机同步验证（fetched 1628 / inserted 1578 / duplicated 50） | ✅ |
 | ruff + pytest | ✅ 通过 |
+| **前端资讯流页面**（`apps/web`：收件箱 / 资讯流 / 详情 / 数据源管理） | ✅ |
+| 前端 `tsc --noEmit` + `vite build` | ✅ 通过 |
+| 前后端联通（Vite 代理 `/api` → 8000 返回真实数据） | ✅ 验证 |
 
 ---
 
@@ -64,13 +67,33 @@
 
 ## P1 · M1 收尾
 
-### 4. 前端资讯流页面（M1 交付项，未开始）
+### 4. ✅ 前端资讯流页面（M1 交付项，已完成 2026-09-19）
 
-- [ ] `apps/web`：React 19 + Vite + TS + Tailwind v4 + shadcn/ui + TanStack Query
-- [ ] 页面：`/` 今日收件箱、`/news` 资讯流（筛选 + 批量选择）、`/news/:id` 详情（含簇内其他来源）
-- [ ] 交互：★ 评级、收藏、隐藏、快捷键（`j/k/s/1~5`）
-- [ ] `/settings/connectors`：数据源管理 + 权限探测结果展示 + 手动同步
-- [ ] 可先用 mock 独立开工（后端 API 已就绪）
+**已实现**（`apps/web`，React 19 + Vite 6 + TS + Tailwind v4 + TanStack Query）：
+
+| 能力 | 说明 |
+| --- | --- |
+| `/` 今日收件箱 | 取今日资讯，前端按 `importance` 降序 |
+| `/news` 资讯流 | 时间范围 / 类型 / 行业筛选 + 无限滚动分页（50/页） |
+| `/news/:id` 整页详情 | 全文、原文链接、**簇内其他报道**、来源登记 |
+| 详情抽屉 | 点卡片即开，`Esc` 关闭，不打断浏览 |
+| 快捷键 | `j/k` 移动、`s` 收藏、`1~5` 评级、`space` 选中 |
+| 卡片徽标 | 重要度三档（重要/一般/参考）、内容类型、行业、**「另有 N 家报道」** |
+| 批量选中 | 底部浮层计数（"写点评"按钮禁用，留待 M2） |
+| `/settings/connectors` | 创建 / 校验 / 同步 / 删除 + **接口权限探测结果可视化** |
+| 乐观更新 | 收藏与评级即时反馈，失败回滚 + Toast |
+
+**与 `docs/04 §8.2` 选型的偏差（有意选择，降低配置复杂度）**：
+
+| 文档选型 | 实际 | 原因 |
+| --- | --- | --- |
+| TanStack Router | `react-router-dom` v7 | 免去 routeTree 代码生成；后续可平滑迁移 |
+| shadcn/ui + Radix | 手写基础组件（`ui.tsx`） | M1 只需 Badge/Button 等少量组件，避免 CLI 生成大量文件 |
+| TanStack Virtual 虚拟滚动 | `useInfiniteQuery` + IntersectionObserver | 当前 1.5k 条量级分页足够；**超过 1 万条再换虚拟列表** |
+| Zustand | 未引入 | 选中态/光标用 `useState` 已足够 |
+| Tiptap | 未引入 | M2 点评编辑器才需要 |
+
+**验证**：`tsc --noEmit` + `vite build` 通过；Vite 代理 `/api` → `:8000` 返回真实数据；SPA 首页与 `/news/:id` 均 200。
 
 ### 5. 同步指标未达标
 
@@ -132,6 +155,32 @@
 
 ---
 
+### 13. 前端遗留（M1 未覆盖）
+
+**未做的页面**（文档 `04 §8.3` 已列出，均在 M2/M3）：
+
+- [ ] `/settings/interests` 兴趣画像（后端 `user_interests` 已有，无 API）
+- [ ] 观点室（点评工作台 + 体检报告）—— M2
+- [ ] 写作台 / 稿件库 / 用量看板 / 风格画像 —— M3/M4
+
+**已知缺口**：
+
+- [ ] **收件箱是简化版**：后端 `GET /news/inbox`（兴趣召回）未实现，前端用 `since=今日` + 前端按重要度排序代替
+- [ ] 卡片缺少「隐藏 / 屏蔽同类」按钮（后端 `hide` / `block_source` 已支持）
+- [ ] 详情缺「关联标的」「行情小图」（后端详情未返回 symbols，需补 `news_item_symbols` 查询）
+- [ ] 无错误边界组件（文档 `04 §8.4` 要求"Agent 任务失败要显示哪一步失败，不要白屏"）
+- [ ] 无登录页 / 用户切换（后端鉴权未接，见 P1-7）
+- [ ] 无草稿本地兜底（`localStorage`）—— M2 点评编辑器才需要
+- [ ] SSE 未接（M2 检查进度与流式写作才需要）
+
+**测试与指标**：
+
+- [ ] 无 E2E（Playwright）与组件测试（Vitest）—— 文档 `04 §8.2` 已列入选型
+- [ ] M1 验收「页面响应 < 300ms」未实测
+- [ ] M1 验收「连续 3 天自动同步」未验证（arq cron 已配置，但未长跑）
+
+---
+
 ## 附：如何复现当前验证
 
 ```bash
@@ -144,4 +193,14 @@ uv run uvicorn app.main:app --reload
 uv run arq app.workers.settings.WorkerSettings
 ```
 
+前端：
+
+```bash
+cd apps/web
+npm install
+npm run dev        # http://localhost:5173，/api 已代理到 :8000
+npm run build      # tsc --noEmit && vite build
+```
+
 > Postgres 用 5433、Redis 用 6380 是为了避开本地已占用的 5432 / 6379。
+> 前后端需同时启动：`uvicorn`（:8000）+ `vite`（:5173）。
