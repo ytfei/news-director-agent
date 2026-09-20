@@ -1,5 +1,11 @@
 /** 展示层格式化工具。后端一律 UTC，展示转本地。 */
 
+/** 素材的「当天分组」键（YYYY-MM-DD，本地时区）。 */
+export function todayISO(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export function formatTime(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)

@@ -16,6 +16,13 @@ from app.core.config import settings
 from app.models.agent import AgentRun, AgentStep, Notification, UsageRecord  # noqa: F401
 from app.models.base import Base
 from app.models.ingest import RawDocument, SourceConnector, SyncRun  # noqa: F401
+from app.models.material import (  # noqa: F401
+    Annotation,
+    AnnotationVersion,
+    Material,
+    MaterialTopic,
+    Topic,
+)
 from app.models.news import (  # noqa: F401
     NewsCluster,
     NewsItem,
@@ -24,6 +31,14 @@ from app.models.news import (  # noqa: F401
     NewsItemTag,
     Tag,
 )
+from app.models.project import (  # noqa: F401
+    Article,
+    ArticleVersion,
+    Project,
+    ProjectMaterial,
+    PromptTemplate,
+)
+from app.models.review import FactCard, FactCardClaim, ReviewFinding, ReviewReport  # noqa: F401
 from app.models.user import User, UserInterest, UserNewsAction  # noqa: F401
 
 config = context.config

@@ -15,6 +15,8 @@ from app.models.enums import ActionType
 from app.models.news import NewsItem, NewsItemRelation
 from app.models.user import UserNewsAction
 from app.repositories.news_repo import NewsRepository
+from app.repositories.review_repo import ReviewRepository
+from app.services.material_service import decorate_news
 
 router = APIRouter(prefix="/news", tags=["news"])
 
@@ -32,6 +34,9 @@ class NewsOut(BaseModel):
     industries: list[str]
     market_scope: list[str]
     source_count: int = 1
+    # ★ M2：列表即带「是否素材 / 是否已批注」，资讯中心一屏内即可渲染徽标
+    material: dict | None = None
+    annotation: dict | None = None
 
     model_config = {"from_attributes": True}
 
@@ -57,8 +62,9 @@ async def list_news(
         content_type=content_type, industry=industry, since=since, until=until
     )
     result = await session.execute(stmt.limit(limit).offset(offset))
-    items = result.scalars().all()
+    items = list(result.scalars().all())
     # source_count：跨源登记了多少家（"另有 N 家报道"的数据来源）
+    decorated = await decorate_news(session, user_id, items)
     return [
         NewsOut(
             id=i.id,
@@ -73,6 +79,8 @@ async def list_news(
             industries=i.industries or [],
             market_scope=i.market_scope or [],
             source_count=len(i.source_refs or []),
+            material=decorated.get(i.id, {}).get("material"),
+            annotation=decorated.get(i.id, {}).get("annotation"),
         )
         for i in items
     ]
@@ -98,6 +106,8 @@ async def get_news(
         )
     ).all()
 
+    decorated = await decorate_news(session, user_id, [item])
+
     return {
         "id": item.id,
         "title": item.title,
@@ -115,6 +125,10 @@ async def get_news(
         "siblings": [
             {"id": s[0], "title": s[1], "source_name": s[2], "url": s[3]} for s in siblings
         ],
+        # M2：详情页直接拿到素材标记、批注摘要与事实基线（若已生成）
+        "material": decorated.get(item.id, {}).get("material"),
+        "annotation": decorated.get(item.id, {}).get("annotation"),
+        "fact_card": await _fact_card_brief(session, item.id),
     }
 
 
@@ -162,6 +176,84 @@ async def create_action(
     session.add(row)
     await session.commit()
     return {"id": row.id, "action": row.action.value, "updated": False}
+
+
+async def _fact_card_brief(session: AsyncSession, news_item_id: uuid.UUID) -> dict | None:
+    repo = ReviewRepository(session)
+    card = await repo.get_card(news_item_id)
+    if card is None:
+        return None
+    claims = await repo.claims_of(card.id)
+    return {
+        "id": card.id,
+        "news_item_id": card.news_item_id,
+        "context_notes": card.context_notes,
+        "related_symbols": card.related_symbols or [],
+        "open_questions": card.open_questions or [],
+        "status": card.status,
+        "generated_at": card.generated_at,
+        "claims": [
+            {
+                "id": c.id,
+                "seq": c.seq,
+                "claim": c.claim,
+                "status": c.status.value,
+                "confidence": float(c.confidence),
+                "evidence": c.evidence or [],
+            }
+            for c in claims
+        ],
+    }
+
+
+class FactCardClaimIn(BaseModel):
+    claim: str
+    status: str = "unverifiable"
+    confidence: float = 0.5
+    evidence: list[dict] = []
+
+
+class FactCardIn(BaseModel):
+    """ResearcherAgent 的落库入口（M2 由 Agent 调用，手动补录也走这里）。"""
+
+    context_notes: str | None = None
+    related_symbols: list[str] = []
+    open_questions: list = []
+    model: str | None = None
+    claims: list[FactCardClaimIn] = []
+
+
+@router.get("/{news_id}/fact-card")
+async def get_fact_card(
+    news_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    user_id: uuid.UUID = Depends(current_user_id),
+) -> dict:
+    card = await _fact_card_brief(session, news_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="fact card not generated yet")
+    return card
+
+
+@router.put("/{news_id}/fact-card")
+async def put_fact_card(
+    news_id: uuid.UUID,
+    payload: FactCardIn,
+    session: AsyncSession = Depends(get_session),
+    user_id: uuid.UUID = Depends(current_user_id),
+) -> dict:
+    if await session.get(NewsItem, news_id) is None:
+        raise HTTPException(status_code=404, detail="news not found")
+    await ReviewRepository(session).upsert_card(
+        news_id,
+        context_notes=payload.context_notes,
+        related_symbols=payload.related_symbols,
+        open_questions=payload.open_questions,
+        model=payload.model,
+        claims=[c.model_dump() for c in payload.claims],
+    )
+    await session.commit()
+    return await _fact_card_brief(session, news_id)
 
 
 __all__ = ["router", "NewsItemRelation"]

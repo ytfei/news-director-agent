@@ -80,6 +80,100 @@ class EnrichStatus(str, enum.Enum):
     failed = "failed"
 
 
+# ---------- 以下为「素材 / 批注 / 体检 / 选题」链路（docs/06） ----------
+
+
+class MaterialStatus(str, enum.Enum):
+    active = "active"
+    archived = "archived"
+
+
+class AnnotationStatus(str, enum.Enum):
+    draft = "draft"
+    checking = "checking"
+    needs_revision = "needs_revision"
+    passed = "passed"
+    blocked = "blocked"
+    locked = "locked"
+
+
+class AnnotationVersionSource(str, enum.Enum):
+    manual = "manual"
+    ai_adopt = "ai_adopt"
+    import_ = "import"
+
+
+class FactStatus(str, enum.Enum):
+    verified = "verified"
+    contradicted = "contradicted"
+    unverifiable = "unverifiable"
+    outdated = "outdated"
+
+
+class ReportVerdict(str, enum.Enum):
+    passed = "passed"
+    needs_revision = "needs_revision"
+    blocked = "blocked"
+
+
+class FindingTrack(str, enum.Enum):
+    fact = "fact"
+    logic = "logic"
+    compliance = "compliance"
+    tone = "tone"
+    uniqueness = "uniqueness"
+
+
+class FindingSeverity(str, enum.Enum):
+    blocker = "blocker"
+    high = "high"
+    medium = "medium"
+    low = "low"
+    info = "info"
+
+
+class FindingStatus(str, enum.Enum):
+    open = "open"
+    accepted = "accepted"
+    dismissed = "dismissed"
+    ignored = "ignored"
+
+
+class ProjectStatus(str, enum.Enum):
+    collecting = "collecting"
+    reviewing = "reviewing"
+    ready = "ready"
+    composing = "composing"
+    drafting = "drafting"
+    completed = "completed"
+    archived = "archived"
+    cancelled = "cancelled"
+
+
+class ProjectMaterialRole(str, enum.Enum):
+    primary = "primary"
+    background = "background"
+
+
+class PromptCategory(str, enum.Enum):
+    style = "style"
+    structure = "structure"
+    persona = "persona"
+    taboo = "taboo"
+
+
+class ArticleStatus(str, enum.Enum):
+    draft = "draft"
+    final = "final"
+    published = "published"
+    archived = "archived"
+
+
+class ArticleVersionSource(str, enum.Enum):
+    ai = "ai"
+    human = "human"
+
+
 def sa_enum(py_enum: type[enum.Enum], name: str):
     """创建指向 PG 原生 ENUM 类型的 SQLAlchemy Enum。"""
     from sqlalchemy import Enum
