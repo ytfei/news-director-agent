@@ -176,6 +176,11 @@ async def compose_project(
     if not assessment["writable"]:
         raise HTTPException(status_code=409, detail="; ".join(assessment["blocking_reasons"]))
 
+    # ★ JSONB 落库前必须 str()：UUID 不是 JSON 可序列化类型，
+    #   否则会在 flush 时抛 StatementError（且只在真正触发写作时才暴露）
+    material_ids = [
+        str(m["id"]) for m in await service.materials_with_context(project.id)
+    ]
     run = AgentRun(
         user_id=user_id,
         graph=RunGraph.compose,
@@ -183,9 +188,9 @@ async def compose_project(
         thread_id=str(uuid.uuid4()),
         input={
             "project_id": str(project.id),
-            "material_ids": [m["id"] for m in await service.materials_with_context(project.id)],
+            "material_ids": material_ids,
             "mode": assessment["mode"],
-            "prompt_ids": project.prompt_ids,
+            "prompt_ids": [str(x) for x in (project.prompt_ids or [])],
         },
     )
     session.add(run)
