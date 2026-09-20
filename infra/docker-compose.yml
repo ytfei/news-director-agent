@@ -30,7 +30,9 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    # ★ MinIO 已从 Docker Hub 下线，镜像只在 Quay（用 minio/minio 会报
+    #   "pull access denied ... repository does not exist"）
+    image: quay.io/minio/minio:latest
     container_name: nda-minio
     command: server /data --console-address ":9001"
     environment:

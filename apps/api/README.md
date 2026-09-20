@@ -2,26 +2,38 @@
 
 观点驱动的内容生产工作台后端（FastAPI + SQLAlchemy 2.0 async + Alembic）。
 
-当前进度：**M1 · 数据底座**。
+当前进度：**M2 · 素材 → 批注 → 体检 → 选题（检查为规则版）**。
 
 ## 快速开始
 
+推荐用仓库根的 Makefile（`make` 可列出全部命令）：
+
 ```bash
-# 1. 依赖
+make env          # 生成 .env
+make infra        # 起 pg 5433 / redis 6380 / minio
+make install      # uv sync
+make migrate      # alembic upgrade head
+make doctor       # 自检：配置 / 连接 / 迁移版本 / 向量维度一致性
+make dev-api      # :8000（另开终端跑 make dev-worker）
+```
+
+手动等价命令：
+
+```bash
 uv sync
-
-# 2. 起基础设施（Postgres + pgvector / Redis）
-docker compose -f ../../infra/docker-compose.yml up -d
-
-# 3. 迁移
+docker compose -f ../../infra/docker-compose.yml up -d postgres redis
 cp .env.example .env
 uv run alembic upgrade head
-
-# 4. 起服务
 uv run uvicorn app.main:app --reload --port 8000
-
-# 5. 起 worker（同步 / 打标）
 uv run arq app.workers.settings.WorkerSettings
+```
+
+容器化部署（api / worker / migrate 共用 `apps/api/Dockerfile` 一个镜像）：
+
+```bash
+make up           # 全套 → web :8080 / api :8000
+make logs-api
+make sh-api       # 进容器
 ```
 
 ## 目录

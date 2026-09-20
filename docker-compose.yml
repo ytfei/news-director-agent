@@ -1,0 +1,165 @@
+# ============================================================================
+# 主理人 Agent · 全栈部署（api / worker / web + 依赖）
+#
+#   make up        # 构建并启动，web → :8080，api → :8000
+#   make logs      # 跟随日志
+#   make down      # 停止（保留数据卷）
+#
+# 与 infra/docker-compose.yml 的分工（两者**可以同时运行，端口不冲突**）：
+#   - infra/…   仅基础设施，把 5433 / 6380 / 9000 暴露给宿主机 → 本地跑代码用
+#   - 本文件     完整应用栈，pg / redis / minio **只在内部网络**，不占宿主机端口
+#
+# ⚠️ 服务名 `api` 会被 web 的 nginx 用作上游地址（${API_UPSTREAM}），改名需同步。
+# ============================================================================
+
+name: nda
+
+x-api-env: &api-env
+  APP_ENV: ${APP_ENV:-prod}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://nda:${POSTGRES_PASSWORD:-nda}@postgres:5432/nda
+  DATABASE_URL_SYNC: postgresql+psycopg://nda:${POSTGRES_PASSWORD:-nda}@postgres:5432/nda
+  REDIS_URL: redis://redis:6379/0
+  # ★ 必须与库中 news_items.embedding 的实际维度一致，否则写入直接报错。
+  #   当前库里是 vector(2048)；改这个值 = 需要重建向量列与索引（见 TODO P0-2）。
+  EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+  TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+  TUSHARE_QPS: ${TUSHARE_QPS:-3.0}
+  ARQ_MAX_JOBS: ${ARQ_MAX_JOBS:-8}
+  ARQ_JOB_TIMEOUT: ${ARQ_JOB_TIMEOUT:-900}
+  REVIEW_MAX_CONCURRENCY: ${REVIEW_MAX_CONCURRENCY:-5}
+
+x-api-build: &api-build
+  context: ./apps/api
+  dockerfile: Dockerfile
+  target: runtime
+
+services:
+  # ---------------------------------------------------------------- 基础设施
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nda-app-postgres
+    environment:
+      POSTGRES_USER: nda
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nda}
+      POSTGRES_DB: nda
+    volumes:
+      - app-pgdata:/var/lib/postgresql/data
+      - ./infra/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nda -d nda"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    # 只在内部网络暴露。需要在宿主机连：make db-shell
+
+  redis:
+    image: redis:7-alpine
+    container_name: nda-app-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - app-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  minio:
+    # ★ MinIO 已从 Docker Hub 下线，镜像只在 Quay（用 minio/minio 会报
+    #   "pull access denied ... repository does not exist"）
+    image: quay.io/minio/minio:latest
+    container_name: nda-app-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-nda}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-nda123456}
+    volumes:
+      - app-minio-data:/data
+    healthcheck:
+      # 服务镜像里没有 mc，用内置的 curl 打健康端点
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- 迁移（一次性）
+  migrate:
+    build: *api-build
+    image: nda-api:latest
+    container_name: nda-app-migrate
+    command: ["alembic", "upgrade", "head"]
+    environment: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  # ---------------------------------------------------------------- API
+  api:
+    build: *api-build
+    image: nda-api:latest
+    container_name: nda-app-api
+    command:
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    environment: *api-env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- Worker（同步 / 打标 / 检查队列）
+  worker:
+    build: *api-build
+    image: nda-api:latest
+    container_name: nda-app-worker
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+    environment: *api-env
+    # ★ 镜像级 HEALTHCHECK 打的是 uvicorn 的 /health；worker 不监听端口，
+    #   沿用会让容器永远 unhealthy。这里关掉，改用日志 + 重启策略兜底。
+    #   TODO：给 arq 接 health_check_interval，再改成基于 Redis 的探活。
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- Web（SPA + /api 反代）
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: runtime
+    image: nda-web:latest
+    container_name: nda-app-web
+    environment:
+      API_UPSTREAM: api:8000
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  app-pgdata:
+  app-redisdata:
+  app-minio-data:

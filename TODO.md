@@ -15,6 +15,7 @@
 | **M1 数据底座** | 资讯进得来、看得见 | ✅ | tushare 真机同步 + 资讯流 + 收藏评级 |
 | **M2 观点闭环** | 素材 → 批注 → 检查 → 选题 | ✅ 规则版 | 迁移 0003/0004、`/api/v1` 26 条路径、9 个前端页面 |
 | M3 自动写作 | 文章能出 | ⬜ 占位 | `POST /projects/{id}/compose` 只做准入校验 + run 建档 |
+| 容器化与部署 | 一条命令起整套 | ✅ | `make up`（web :8080 / api :8000）+ `make doctor` 自检 |
 | M0 假设验证 | 用户愿不愿意先写点评 | ⬜ **未执行（进 M3 前的 Gate）** | — |
 
 **一句话**：现在可以完整走通「挑素材 → 写批注 → 体检 → 建选题 → 触发写作（待接）」，缺的是 Agent 层与写作台。
@@ -89,7 +90,36 @@
 | `/prompts` | 提示词 | 按 category 分组、版本号、新建 |
 | `/settings/connectors` | 数据源 | 权限探测、手动同步、同步日志 |
 
-### 1.4 验收口径（可复现）
+### 1.4 容器化与部署（2026-09-20）
+
+| 产物 | 说明 |
+| --- | --- |
+| `apps/api/Dockerfile` | 3 阶段：`builder`（uv 锁文件装依赖）→ `runtime`（非 root、tini 收信号、HEALTHCHECK）→ `dev`（含 pytest/ruff）。**一个镜像跑 api / worker / migrate 三种角色**，避免依赖漂移 |
+| `apps/web/Dockerfile` | `deps`（`npm ci`）→ `build`（`tsc --noEmit && vite build`，类型错就让镜像构建失败）→ `runtime`（nginx 静态托管） |
+| `apps/web/nginx/default.conf.template` | SPA 深链回退 · `/api` 反代（`envsubst` 注入上游，**无 CORS**）· SSE 关缓冲 · 静态资源长缓存 · 安全响应头 |
+| `docker-compose.yml`（根） | 全栈：postgres / redis / minio / **migrate（一次性）** / api / worker / web。依赖 `service_healthy` + `service_completed_successfully` 编排启动顺序 |
+| `infra/docker-compose.yml` | 保留为"仅基础设施"模式（暴露 5433 / 6380 / 9000 给宿主机）—— **与全栈 compose 端口不冲突，可同时运行** |
+| `Makefile` | 42 个目标（含 `help`），`make` 即列全部：准备 / 本地开发 / 测试与质量 / Docker 构建部署 / 清理 |
+| `apps/api/scripts/doctor.py` | 部署前自检：配置 → DB → Redis → 迁移版本 → **向量维度一致性** → 向量索引 → 关键表 → 预置数据。可 `docker compose exec api python scripts/doctor.py` 在真实环境跑 |
+
+**实测记录**（全新数据卷，从零拉起）
+
+```
+$ make up
+ Container nda-app-postgres  Healthy      Container nda-app-migrate  Exited(0)
+ Container nda-app-redis     Healthy      Container nda-app-api      Healthy
+ Container nda-app-minio     Healthy      Container nda-app-worker   Started
+ Container nda-app-web       Started
+
+$ docker compose exec -T postgres psql -U nda -d nda -c "select count(*) from pg_tables where schemaname='public'"
+ 31   （30 张业务表 + alembic_version）      alembic_version = 0004_system_topics
+$ docker compose exec -T api python scripts/doctor.py   →  自检通过
+$ curl localhost:8080/api/v1/topics                     →  200（经 nginx 反代）
+$ curl -X POST localhost:8080/api/v1/topics             →  201（写路径通）
+$ curl localhost:8080/workbench                         →  200（SPA 深链回退生效）
+```
+
+### 1.5 验收口径（可复现）
 
 ```bash
 cd apps/api
@@ -118,6 +148,9 @@ npm run build                        # tsc --noEmit + vite build 通过
 | D2 | 触发写作时 `Object of type UUID is not JSON serializable` | `agent_runs.input` 里塞了 UUID 对象（只在真正 compose 时才暴露） | JSONB 落库前统一 `str()` |
 | D3 | **集成测试被静默 skip，假装通过** | `engine` 是模块级，pytest-asyncio 每测试一个事件循环，跨循环复用 asyncpg 连接 | 新增 `tests/conftest.py` 每测试后 `engine.dispose()` |
 | D4 | 素材主题从零开始打，跨日期无聚类价值 | 未预置主题词表 | 迁移 0004 预置 15 个系统主题 |
+| D5 | `docker compose up` 拉不到 `minio/minio` | MinIO 已从 Docker Hub 下线，镜像只在 Quay | 两个 compose 都改 `quay.io/minio/minio`；健康检查改用内置 curl（服务镜像没有 `mc`） |
+| D6 | worker 容器永远 `unhealthy` | 镜像级 HEALTHCHECK 打的是 uvicorn `/health`，worker 不监听端口 | compose 里 `healthcheck: disable`，并记录正确的修法（arq health check + Redis 探活） |
+| D7 | `docker compose up -d api` 重建后，前端全站 502 | nginx 只在启动时解析上游主机名，容器重建 IP 变了 | nginx 改用 `resolver` + 变量 `proxy_pass`，按请求重新解析；已用 `--force-recreate api` 验证 |
 
 > D3 最危险：`pytest` 报"通过"，但 4 条集成测试其实一条都没跑。修掉后立刻暴露了 D2 与 D4。
 
@@ -125,12 +158,14 @@ npm run build                        # tsc --noEmit + vite build 通过
 
 | # | 现象 | 影响 | 方向 |
 | --- | --- | --- | --- |
-| D5 | 采纳建议 / 改写正文后，旧报告的 `span_start/span_end` 会错位 | 体检页高亮画错位置 | 报告增加 `is_stale` 标记（版本号 ≠ 当前版本即提示"报告已过期，请复检"） |
-| D6 | 驳回记忆永久化：正文大改后仍屏蔽同一问题 | 用户改了写法却拿不到新结论 | 正文变更超过阈值（如 diff > 30%）时清空该点评的驳回记忆 |
-| D7 | 前端用 `window.location.href` 跳转 | 绕过 react-router，丢失 SPA 状态 | 统一改 `useNavigate` |
-| D8 | 单批检查上限 20 / 并发 ≤5 只在文档 | 批量提交可能打满 LLM 造成成本尖峰 | 服务端 enforce + 返回 429/422 |
-| D9 | `/materials` 用 `limit/offset`，无游标 | 素材上量后翻页退化 | 改用 `before_date + offset` 复合游标 |
-| D10 | 集成测试写进开发库 | 开发库被测试数据污染（当前 18 条测试素材） | 独立测试库 + `seed` / `reset` 脚本 |
+| D8 | 采纳建议 / 改写正文后，旧报告的 `span_start/span_end` 会错位 | 体检页高亮画错位置 | 报告增加 `is_stale` 标记（版本号 ≠ 当前版本即提示"报告已过期，请复检"） |
+| D9 | 驳回记忆永久化：正文大改后仍屏蔽同一问题 | 用户改了写法却拿不到新结论 | 正文变更超过阈值（如 diff > 30%）时清空该点评的驳回记忆 |
+| D10 | 前端用 `window.location.href` 跳转 | 绕过 react-router，丢失 SPA 状态 | 统一改 `useNavigate` |
+| D11 | 单批检查上限 20 / 并发 ≤5 只在文档 | 批量提交可能打满 LLM 造成成本尖峰 | 服务端 enforce + 返回 429/422 |
+| D12 | `/materials` 用 `limit/offset`，无游标 | 素材上量后翻页退化 | 改用 `before_date + offset` 复合游标 |
+| D13 | 集成测试写进开发库 | 开发库被测试数据污染 | 独立测试库 + `seed` / `reset` 脚本（CI 的前置条件） |
+| D14 | worker 没有可用的健康探针 | 容器只剩日志兜底，编排层无法判断"worker 死了但没退出" | 给 arq `WorkerSettings` 接 `health_check_interval`，再改成基于 Redis 的探活 |
+| D15 | 镜像 EXPOSE 让 worker 在 `docker compose ps` 里显示 `8000/tcp` | 误导（worker 不监听端口） | 多角色共用镜像的固有代价，或在 compose 覆盖标注 |
 
 ---
 
@@ -148,11 +183,19 @@ npm run build                        # tsc --noEmit + vite build 通过
 
 ### 2. pgvector 索引维度超限
 
-- **现象**：`EMBEDDING_DIM=2048` > HNSW / IVFFlat 上限 2000，建索引报错；迁移里条件化跳过。
+- **现象**：实际生效的 `EMBEDDING_DIM=2048` > HNSW / IVFFlat 上限 2000，建索引报错；迁移里条件化跳过。
+- **★ 现在有三处不一致**（`make doctor` 已能检出）：
+  | 位置 | 值 |
+  | --- | --- |
+  | 数据库 `news_items.embedding` | `vector(2048)` |
+  | Shell 导出的环境变量 / compose 默认值 | `2048` |
+  | `apps/api/.env` 文件 | `1024`（**被环境变量静默覆盖**） |
+  → 一旦换环境（比如在没导出该变量的机器上跑），同一份代码就会用 1024 维去写 2048 维的列，直接报错。
 - **现状**：`alembic check` 会反复检出 `ix_news_clusters_centroid` / `ix_news_items_embedding` 差异 —— **这是当前 CI 的门槛问题**。
 - [ ] 定案向量方案（换 ≤2000 维模型 / Matryoshka 降维 / 维持全表扫描）
-- [ ] 固定 `EMBEDDING_DIM` 并更新文档（文档仍写 1024）
-- **验收**：`alembic check` 无差异，语义检索走索引
+- [ ] 把三处值统一，并删掉 `apps/api/.env` 里被覆盖的那一行（或改用环境变量注入）
+- [ ] 固定后更新文档（`docs/05` 仍写 1024）
+- **验收**：`make doctor` 无 WARN，`alembic check` 无差异，语义检索走索引
 
 ### 3. tushare 接口权限不足
 
@@ -184,7 +227,7 @@ npm run build                        # tsc --noEmit + vite build 通过
 
 ### 6. 素材 / 批注体验收尾
 
-- [ ] D5 报告过期提示、D6 驳回记忆失效策略、D7 路由跳转、D8 批量上限 enforce、D9 素材分页游标
+- [ ] D8 报告过期提示、D9 驳回记忆失效策略、D10 路由跳转、D11 批量上限 enforce、D12 素材分页游标、D14 worker 探针
 - [ ] 批注撤销 / 版本回退 UI（接口已有 `GET /annotations/{id}/versions`）
 - [ ] 「AI 提示问题」与「引用事实」入口（原型有，前端尚未接）
 
@@ -242,10 +285,14 @@ npm run build                        # tsc --noEmit + vite build 通过
 - [ ] 导出 MD / HTML / Word，附「AI 辅助撰写」标识
 - [ ] 可追溯视图：文章 → 段落 → 批注 → 素材 → 证据
 
-### 15. 工程化（一直欠着）
-- [ ] `docker-compose.yml` 补 `api` / `worker` 服务（当前只有 pg / redis / minio）
-- [ ] CI：ruff + pytest + `alembic check`（**先解 P0-2，否则 check 必然红**）
-- [ ] 测试库隔离 + `seed` / `reset` 脚本（解 D10）
+### 15. 工程化
+- [x] `docker-compose.yml` 补 `api` / `worker` / `web` / `migrate` 服务（2026-09-20）
+- [x] 多阶段 Dockerfile（api 一镜像三角色 + web nginx）、Makefile 33 个目标、`scripts/doctor.py` 部署自检
+- [ ] **CI**：ruff + pytest + `alembic check`（`make check` 已提供入口，缺的是流水线；**先解 P0-2，否则 check 必然红**）
+- [ ] 测试库隔离 + `seed` / `reset` 脚本（解 D13，也是 CI 的前置条件）
+- [ ] 镜像发布到 registry + 多架构构建（当前只在本地 build）
+- [ ] HTTPS / 域名 / 反向代理前置（现在 nginx 只提供 HTTP，靠外层网关终止 TLS）
+- [ ] 日志聚合与指标（`usage_records` / Prometheus，配 `docker compose logs` 之外的可观测）
 - [ ] `enrich_service` 规则版待 `ScoutAgent` 替换
 - [ ] `ModelProvider` / `Tracer` / `SecretsProvider` 抽象落代码（私有化前置）
 - [ ] LangSmith / Langfuse trace 接入
@@ -266,23 +313,48 @@ npm run build                        # tsc --noEmit + vite build 通过
 ## 附 · 如何复现
 
 ```bash
-# 1. 基础设施（pg 5433 / redis 6380 / minio）
-cd infra && docker compose up -d postgres redis
+make            # 列出全部命令（42 个）
+make doctor     # 先跑这个：配置 / DB / Redis / 迁移 / 向量维度一致性
+```
 
-# 2. 后端
-cd ../apps/api
-uv sync && cp .env.example .env
-uv run alembic upgrade head        # 0001 → 0004
-uv run pytest tests/ -q            # 18 passed
-uv run uvicorn app.main:app --reload --port 8000
-uv run arq app.workers.settings.WorkerSettings
+### A. 容器部署（推荐，一条命令起整套）
 
-# 3. 前端（dev server 代理 /api → :8000）
-cd ../web && npm install && npm run dev   # http://localhost:5173
+```bash
+cp .env.example .env     # 按需填 TUSHARE_TOKEN
+make up                  # → web http://localhost:8080 · api http://localhost:8000/docs
+make smoke               # 探活 web / api，并验证 nginx → api 反代
+make logs                # 跟随日志
+make down                # 停止（保留数据卷）；make down-clean 会清库
+```
 
-# 4. 看交互设计（纯静态，无需后端）
+### B. 本地开发（依赖走 Docker，代码热重载）
+
+```bash
+make env                 # 生成 .env（根目录 + apps/api）
+make infra               # pg 5433 / redis 6380 / minio 9000-9001
+make install             # uv sync + npm ci
+make migrate             # 0001 → 0004
+make dev-api             # :8000（另开终端）
+make dev-worker          # arq 队列（另开终端）
+make dev-web             # :5173，/api 反代到 :8000
+```
+
+### C. 测试与质量
+
+```bash
+make test                # 后端 pytest + 前端 tsc && vite build
+make test-unit           # 只跑不依赖 DB 的规则单测
+make test-integration    # 只跑集成测试（需 Postgres 已迁移）
+make lint                # ruff + alembic check
+make check               # 提交前门禁（lint + test）
+```
+
+### D. 看交互设计（纯静态，无需后端）
+
+```bash
 open prototype/index.html
 ```
 
-> Postgres 用 5433、Redis 用 6380 是为了避开本地已占用的 5432 / 6379。
+> 两套 compose 可同时运行：`infra/` 暴露 5433/6380/9000 给宿主机（本地开发用），
+> 根目录的全栈 compose 把 pg/redis/minio 关在内部网络（部署用），**端口不冲突**。
 > 迁移链：`c6fca63ba48f`（M1 核心 16 表）→ `0002_triggers` → `0003_materials`（M2 中枢 14 表）→ `0004_system_topics`（预置主题）。

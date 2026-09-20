@@ -1,0 +1,68 @@
+# nginx 配置模板：容器启动时由官方镜像的 envsubst 注入 ${API_UPSTREAM}
+# （只有已定义的环境变量会被替换，$host / $uri 这类 nginx 变量不受影响）
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ---- 安全响应头（自托管场景的最低要求） ----
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
+    gzip_types text/plain text/css application/javascript application/json
+               image/svg+xml application/font-woff2;
+
+    # ---- 后端 API ----
+    # 前端请求的是相对路径 /api/v1/...，这里原样透传，因此没有 CORS 问题
+    location /api/ {
+        # ★ 必须用变量 + resolver，不能写死 proxy_pass http://api:8000
+        #   nginx 只在启动时解析一次主机名；`docker compose up -d api` 重建容器后
+        #   IP 会变，写死就会一直打旧 IP（表现为 502，且只有重启 nginx 才恢复）。
+        #   加上变量后每个请求都按 valid 有效期重新解析。
+        resolver ${NGINX_RESOLVER};
+        set $api_upstream "${API_UPSTREAM}";
+        # 带变量时不自动追加 URI，必须显式带上原始请求路径
+        proxy_pass http://$api_upstream$request_uri;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        # ★ 写作台要靠 SSE 推流：必须关掉缓冲，否则前端收不到增量 token
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        # 手动同步 / 批量检查可能跑几十秒
+        proxy_connect_timeout 10s;
+    }
+
+    # ---- 静态资源：内容哈希命名，可长缓存 ----
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # ---- SPA 路由回退（/workbench、/reviews/xxx 直接刷新不能 404） ----
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # index.html 不缓存，否则发版后用户还拿着旧壳
+    location = /index.html {
+        add_header Cache-Control "no-store, must-revalidate";
+    }
+}

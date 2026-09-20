@@ -1,0 +1,20 @@
+# 镜像里不要带本机虚拟环境与缓存（venv 由 builder 阶段生成）
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 凭据绝不入镜像；.env.example 保留作为文档
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 本地开发产物
+*.log
+.DS_Store
