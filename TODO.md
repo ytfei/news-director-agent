@@ -88,7 +88,7 @@
 | `/projects` | 选题 | 素材挑选器、可写作性判定、`opinion` / `digest` 模式提示 |
 | `/projects/:id/compose` | AI 写作 | 占位：呈现 WriterAgent 的真实输入（brief），不画假界面 |
 | `/prompts` | 提示词 | 按 category 分组、版本号、新建 |
-| `/settings/connectors` | 数据源 | 权限探测、手动同步、同步日志 |
+| `/settings/connectors` | 数据源 | **能力声明驱动的配置表单**（新增渠道不改前端）、逐来源可用状态、权限探测、手动同步、同步日志 |
 
 ### 1.4 容器化与部署（2026-09-20）
 
@@ -149,8 +149,9 @@ npm run build                        # tsc --noEmit + vite build 通过
 | D3 | **集成测试被静默 skip，假装通过** | `engine` 是模块级，pytest-asyncio 每测试一个事件循环，跨循环复用 asyncpg 连接 | 新增 `tests/conftest.py` 每测试后 `engine.dispose()` |
 | D4 | 素材主题从零开始打，跨日期无聚类价值 | 未预置主题词表 | 迁移 0004 预置 15 个系统主题 |
 | D5 | `docker compose up` 拉不到 `minio/minio` | MinIO 已从 Docker Hub 下线，镜像只在 Quay | 两个 compose 都改 `quay.io/minio/minio`；健康检查改用内置 curl（服务镜像没有 `mc`） |
-| D6 | worker 容器永远 `unhealthy` | 镜像级 HEALTHCHECK 打的是 uvicorn `/health`，worker 不监听端口 | compose 里 `healthcheck: disable`，并记录正确的修法（arq health check + Redis 探活） |
+| D6 | worker 容器永远 `unhealthy` | 镜像级 HEALTHCHECK 打的是 uvicorn `/health`，worker 不监听端口 | 改为读 arq 自带健康 beacon（见 D14） |
 | D7 | `docker compose up -d api` 重建后，前端全站 502 | nginx 只在启动时解析上游主机名，容器重建 IP 变了 | nginx 改用 `resolver` + 变量 `proxy_pass`，按请求重新解析；已用 `--force-recreate api` 验证 |
+| D14 | worker 没有可用的健康探针 | arq **本来就提供** beacon：`WorkerSettings.health_check_interval=30` 每 30s 写 `arq:queue:health-check`，值为运行统计、TTL = interval+1s（arq 0.28.0）。缺的只是"读它"的探针 | compose 加 healthcheck 直接读该 key。「key 存在」⟺「worker 活着」，进程卡死或被杀后 31s 内自动消失——比只看日志可靠（日志只能发现"退出"，发现不了"卡住但没退出"）。已验证：删 key → 探针转 False |
 
 > D3 最危险：`pytest` 报"通过"，但 4 条集成测试其实一条都没跑。修掉后立刻暴露了 D2 与 D4。
 
@@ -164,7 +165,6 @@ npm run build                        # tsc --noEmit + vite build 通过
 | D11 | 单批检查上限 20 / 并发 ≤5 只在文档 | 批量提交可能打满 LLM 造成成本尖峰 | 服务端 enforce + 返回 429/422 |
 | D12 | `/materials` 用 `limit/offset`，无游标 | 素材上量后翻页退化 | 改用 `before_date + offset` 复合游标 |
 | D13 | 集成测试写进开发库 | 开发库被测试数据污染 | 独立测试库 + `seed` / `reset` 脚本（CI 的前置条件） |
-| D14 | worker 没有可用的健康探针 | 容器只剩日志兜底，编排层无法判断"worker 死了但没退出" | 给 arq `WorkerSettings` 接 `health_check_interval`，再改成基于 Redis 的探活 |
 | D15 | 镜像 EXPOSE 让 worker 在 `docker compose ps` 里显示 `8000/tcp` | 误导（worker 不监听端口） | 多角色共用镜像的固有代价，或在 compose 覆盖标注 |
 
 ---
@@ -197,17 +197,31 @@ npm run build                        # tsc --noEmit + vite build 通过
 - [ ] 固定后更新文档（`docs/05` 仍写 1024）
 - **验收**：`make doctor` 无 WARN，`alembic check` 无差异，语义检索走索引
 
-### 3. tushare 接口权限不足
+### 3. tushare 快讯「返回 0 行」 —— 已于 2026-09-20 定位并修复
 
-| 接口 | 实测 | 后果 |
+**原判断（记录在案，避免重犯）**：把 `news` 的"返回 0 行、不报错"当成了**权限问题**。
+实际是**我们自己的调用参数写错**，两个错误各自都会让接口返回空：
+
+| 错误 | 旧实现 | 官方规格（doc 143） |
 | --- | --- | --- |
-| `news`（快讯） | 返回 0 行、**不报错** | 最危险，会造成"同步成功但 0 条"假象 |
-| `anns_d` / `npr` / `research_report` | 无权限 | 公告 / 政策 / 研报三类素材拿不到 |
-| `major_news` / `cctv_news` / 行情类 | 可用 | — |
+| `src` 参数 | 默认不传 | **必选**，9 个来源之一 |
+| 时间格式 | `%Y%m%d %H%M%S` | `%Y-%m-%d %H:%M:%S` |
 
+修正后真机结果：3 天窗口抓取 **3842 条 / 落库 3799 条**，来源正确落到
+财联社 / 新浪财经（再验 10jqka 同花顺亦有数据）。
+
+- [x] 拆出独立的 `tushare.flash` 连接器（多来源可配、按来源独立限流与游标）
+- [x] 修正 `src` 必传 + 时间格式
+- [x] 单次 1500 条触顶 → 自动二分细分窗口，避免静默丢数据
+- [x] 顺带修掉 pandas 脏值炸 jsonb（`float('nan')` → 非法 JSON 被 PG 拒收，`json_safe` 统一归一）
+- [x] 前端逐来源展示可用状态（不再是笼统的"接口无权限"）
+- [ ] **仍无权限**：`anns_d` / `npr` / `research_report`（公告 / 政策 / 研报三类素材拿不到）
 - [ ] 评估更高积分 token 成本，或接第二数据源（RSS / 交易所公告 / 政府网政策）
-- [ ] 前端展示 `source_connectors.config.probe`，明确告知"当前 token 无 XX 接口权限"
-- **验收**：至少覆盖「快讯 + 公告 + 政策」三类 `content_type`
+- **验收**：至少覆盖「快讯 + 公告 + 政策」三类 `content_type` —— **快讯 ✅**，公告/政策仍待解决
+
+> **教训（写进 `docs/04 §4.4.1`）**：接不上某个数据源时，先怀疑自己的参数，
+> 再怀疑对方权限。"返回 0 行"和"无权限"是两种完全不同的故障，
+> 混为一谈会让我们白白绕开一个本来可用的数据源。
 
 ### 4. 鉴权未接
 
@@ -227,7 +241,7 @@ npm run build                        # tsc --noEmit + vite build 通过
 
 ### 6. 素材 / 批注体验收尾
 
-- [ ] D8 报告过期提示、D9 驳回记忆失效策略、D10 路由跳转、D11 批量上限 enforce、D12 素材分页游标、D14 worker 探针
+- [ ] D8 报告过期提示、D9 驳回记忆失效策略、D10 路由跳转、D11 批量上限 enforce、D12 素材分页游标
 - [ ] 批注撤销 / 版本回退 UI（接口已有 `GET /annotations/{id}/versions`）
 - [ ] 「AI 提示问题」与「引用事实」入口（原型有，前端尚未接）
 

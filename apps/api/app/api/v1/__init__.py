@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 
-from app.api.v1 import annotations, connectors, materials, news, projects, reviews
+from app.api.v1 import annotations, connectors, market, materials, news, projects, reviews
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(connectors.router)
 api_router.include_router(news.router)
+api_router.include_router(market.router)
 
 # M2：素材 →（可选）批注 → 检查 → 选题
 api_router.include_router(materials.router)

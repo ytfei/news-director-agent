@@ -128,11 +128,19 @@ services:
     container_name: nda-app-worker
     command: ["arq", "app.workers.settings.WorkerSettings"]
     environment: *api-env
-    # ★ 镜像级 HEALTHCHECK 打的是 uvicorn 的 /health；worker 不监听端口，
-    #   沿用会让容器永远 unhealthy。这里关掉，改用日志 + 重启策略兜底。
-    #   TODO：给 arq 接 health_check_interval，再改成基于 Redis 的探活。
+    # ★ 不能沿用镜像级 HEALTHCHECK（它打的是 uvicorn 的 /health，worker 不监听端口）。
+    #   改用 arq 自带的健康 beacon：WorkerSettings.health_check_interval=30，
+    #   每 30s 写一次 arq:queue:health-check，值是可读的运行统计，TTL = interval+1s。
+    #   于是「key 存在」⟺「worker 还活着」——进程卡死或被杀后 31s 内 key 自动消失，
+    #   这比只看日志可靠（日志只能发现"退出了"，发现不了"卡住但没退出"）。
     healthcheck:
-      disable: true
+      test:
+        - CMD-SHELL
+        - "python -c \"import os,redis,sys;sys.exit(0 if redis.Redis.from_url(os.environ['REDIS_URL']).get('arq:queue:health-check') else 1)\""
+      interval: 15s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
     depends_on:
       postgres:
         condition: service_healthy

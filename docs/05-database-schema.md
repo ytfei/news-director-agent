@@ -86,6 +86,9 @@ erDiagram
     source_connectors ||--o{ sync_runs : "runs"
     source_connectors ||--o{ raw_documents : "fetches"
     raw_documents ||--o| news_items : "normalized_to"
+    source_connectors ||--o{ market_facts : "emits"
+    raw_documents ||--o{ market_facts : "traced_from"
+    news_items ||--o{ market_facts : "carries"
     news_items ||--o{ news_item_symbols : "mentions"
     news_items ||--o{ news_item_tags : "tagged"
     news_clusters ||--o{ news_items : "clusters"
@@ -419,6 +422,74 @@ CREATE TABLE news_item_tags (
 );
 CREATE INDEX ix_news_item_tags_tag ON news_item_tags (tag_id, created_at DESC);
 ```
+
+---
+
+### 3.2.1 数值事实层（市场信息）
+
+> **M2 新增（迁移 `0005_market_facts`）**。数值型市场信息（行情 / 资金流 / 宏观指标）与文本资讯**分流存储**：
+> "某标的价格 = 7.4 万元/吨"是可核查、可对齐时间轴的结构化数值。
+> 塞进 `news_items` 的后果：文本表会长出一堆只在少数行有值的列，
+> 而事实核对只能在正文里正则撒网。
+>
+> **本期状态**：只接了 tushare 快讯（不产出数值事实），所以这张表当前是空的。
+> 但写入路径（`MarketFactRepository.upsert_from_item`）与读取接口都是真实可用的，
+> 由 `tests/test_market_fact.py` 覆盖（含幂等与端到端分流），不是死代码。
+
+```sql
+CREATE TABLE market_facts (
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- 事实本身（长表：一行一个指标，新增指标只插数据不改表结构）
+    name                text NOT NULL,                 -- 指标名
+    value               numeric(24,6) NOT NULL,        -- 24 位总长：覆盖 75000000000 与 0.000125
+    unit                text,                          -- 元/吨、%、亿元
+    period              text,                          -- 2026Q2 / 2026-08
+    ts_code             text,                          -- 标准码；宏观指标为空
+    observed_at         timestamptz,                   -- 该数值本身的观测时间（可 ≠ 条目发布时间）
+    -- 溯源：与新闻条目一样必须能回溯到原始层
+    source_connector_id uuid NOT NULL REFERENCES source_connectors(id) ON DELETE CASCADE,
+    raw_document_id     uuid REFERENCES raw_documents(id) ON DELETE SET NULL,
+    news_item_id        uuid REFERENCES news_items(id) ON DELETE SET NULL,
+    external_id         text NOT NULL,                 -- 幂等键（见下）
+    -- 扩展
+    attributes          jsonb NOT NULL DEFAULT '{}'::jsonb,
+    payload             jsonb NOT NULL DEFAULT '{}'::jsonb,  -- 该指标的原始片段，便于排查
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    deleted_at          timestamptz
+);
+
+-- 幂等：同一连接器的同一条事实只落一次
+-- （唯一性一律用部分唯一索引，禁止把 deleted_at 写进 UNIQUE，见 §1）
+CREATE UNIQUE INDEX uq_market_facts_source_external
+    ON market_facts (source_connector_id, external_id) WHERE deleted_at IS NULL;
+
+-- 主查询路径：按标的取某指标的时间序列
+CREATE INDEX ix_market_facts_symbol_name_time ON market_facts (ts_code, name, observed_at);
+-- 宏观类指标没有标的：按指标名取时间序列
+CREATE INDEX ix_market_facts_name_time        ON market_facts (name, observed_at);
+CREATE INDEX ix_market_facts_news             ON market_facts (news_item_id);
+```
+
+**幂等键的构成**（`MarketFactRepository.fact_key`）：
+
+```
+sha256(条目 external_id | 指标名 | 标的 | 期间 | 观测时点)[:32]
+```
+
+**刻意不含 `value`**：上游更正数值时应**更新同一行**，而不是产生第二条事实。
+所以键回答的是"谁在什么时候说了哪个指标"，数值是可变的载荷。
+
+**为什么用长表而不是宽表**：指标名（`name`）是数据不是结构。
+宽表意味着每接一个新指标就要加列 + 迁移；长表只插数据。
+代价是"取一条指标序列"要按 `name` 过滤而不是直接读列 —— 这正是上面两个索引存在的意义。
+
+**关联原始层**：与资讯条目一样，`raw_document_id` 保证可回溯到原始 payload；
+`news_item_id` 用于回答"这个数字是从哪篇稿子里抽出来的"。
+
+**接行情数据源时的下一步**：写一个产出 `Metric` 的连接器 +
+一个 `ChannelSpec(metric_specs=[...])` 声明即可，**落库链路不需要改**
+（`sync_service` 已按 `has_metrics` 分流）。
 
 ---
 
@@ -1246,14 +1317,18 @@ CREATE TRIGGER trg_<table>_updated_at BEFORE UPDATE ON <table>
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 ```
 
+当前已登记该触发器的表（新增表时**必须同步登记**，迁移 `0002` + 各表自己的迁移）：
+
+`users` `source_connectors` `news_clusters` `news_items` `user_interests` `market_facts`
+
 ---
 
-## 5. 附：表清单速查（共 36 张）
+## 5. 附：表清单速查（共 37 张）
 
 | 层 | 数量 | 表 |
 | --- | --- | --- |
 | 采集 ODS | 3 | `source_connectors` `raw_documents` `sync_runs` |
-| 资讯 DWD | 6 | `news_clusters` `news_items` `news_item_symbols` `news_item_relations` `tags` `news_item_tags` |
+| 资讯 DWD | 7 | `news_clusters` `news_items` `news_item_symbols` `news_item_relations` `tags` `news_item_tags` **`market_facts`** |
 | 用户 | 4 | `users` `user_interests` `user_news_actions` `user_style_profiles` |
 | 观点（核心域） | 7 | `fact_cards` `fact_card_claims` `annotations` `annotation_versions` `review_reports` `review_findings` `review_finding_evidence` |
 | 选题与产出 | 7 | `projects` `project_items` `articles` `article_versions` `article_assets` `opinions` `publish_records` |
@@ -1265,9 +1340,9 @@ CREATE TRIGGER trg_<table>_updated_at BEFORE UPDATE ON <table>
 | 阶段 | 需要的表 | 数量 |
 | --- | --- | --- |
 | **M1** 数据底座 | 采集 3 + 资讯 6 + `users` `user_interests` `user_news_actions` + `agent_runs` / `agent_steps` / `sync_runs` | 17 |
-| **M2** 观点闭环 | M1 + 观点域 7 + `user_style_profiles` + `stream_events` + **`compliance_rules`** | 26 |
-| **M3** 自动写作 | M2 + 选题产出 5（`opinions` `publish_records` 延后）+ Agent 与提示词层 + `notifications` `usage_records` | 35 |
-| **M4** 沉淀扩展 | 全部 36 | 36 |
+| **M2** 观点闭环 | M1 + 观点域 7 + `user_style_profiles` + `stream_events` + **`compliance_rules`** + **`market_facts`** | 27 |
+| **M3** 自动写作 | M2 + 选题产出 5（`opinions` `publish_records` 延后）+ Agent 与提示词层 + `notifications` `usage_records` | 36 |
+| **M4** 沉淀扩展 | 全部 37 | 37 |
 
 > **修订**：`compliance_rules` 从 M4 **提前到 M2**。合规轨道是 M2 的核心交付，
 > "红线召回率 > 95%"不可能只靠 prompt 达成，必须依赖可配置红线词库。

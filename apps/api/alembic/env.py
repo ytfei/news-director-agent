@@ -10,12 +10,11 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
-
 from app.core.config import settings
 from app.models.agent import AgentRun, AgentStep, Notification, UsageRecord  # noqa: F401
 from app.models.base import Base
 from app.models.ingest import RawDocument, SourceConnector, SyncRun  # noqa: F401
+from app.models.market import MarketFact  # noqa: F401
 from app.models.material import (  # noqa: F401
     Annotation,
     AnnotationVersion,
@@ -40,6 +39,7 @@ from app.models.project import (  # noqa: F401
 )
 from app.models.review import FactCard, FactCardClaim, ReviewFinding, ReviewReport  # noqa: F401
 from app.models.user import User, UserInterest, UserNewsAction  # noqa: F401
+from sqlalchemy import engine_from_config, pool
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL_SYNC)

@@ -10,10 +10,12 @@ from datetime import datetime, timedelta
 
 import structlog
 
+from app.connectors.registry import migration_hint
 from app.core.database import SessionLocal
 from app.core.redis import acquire_lock, release_lock
 from app.models.enums import SyncStatus
 from app.repositories.ingest_repo import ConnectorRepository, SyncRunRepository
+from app.repositories.market_repo import MarketFactRepository
 from app.repositories.news_repo import NewsRepository
 from app.services.connector_factory import build_connector
 
@@ -36,21 +38,16 @@ def empty_reason(connector) -> str:
     """同步结果为空时，给出人话原因（docs/03 §3 步骤① 失败处理表）。
 
     必须区分「权限不足 / 非交易日 / 区间无数据」，否则用户会以为系统坏了。
-    """
-    # 用户显式指定了接口，但全部不可用 → 必须明说，否则会以为"同步成功但没数据"
-    selected = (connector.config or {}).get("endpoints")
-    if selected:
-        allowed = set(getattr(connector, "available_endpoints", []) or [])
-        missing = [a for a in selected if a not in allowed]
-        if missing:
-            return f"所选接口无权限或返回空：{', '.join(missing)}；请在数据源配置中改用可用接口"
 
-    probe = getattr(connector, "probe_results", {}) or {}
-    if probe and not any(r["ok"] for r in probe.values()):
-        return "所有接口均无权限或返回空，请检查 token 积分"
-    if probe and not all(r["ok"] for r in probe.values()):
-        partial = [a for a, r in probe.items() if r["ok"]]
-        return f"仅 {', '.join(partial)} 可用，其余接口无权限或该区间无数据"
+    判定依据因渠道而异（tushare 看接口权限，快讯看来源），所以优先问连接器自己
+    （`DataSourceConnector.empty_reason()`），拿不到再退到通用兜底文案 —— 
+    这样新增渠道不需要改这里。
+    """
+    own = getattr(connector, "empty_reason", None)
+    if callable(own):
+        reason = own()
+        if reason:
+            return reason
     return "区间内无数据（可能是非交易日或时间段内无更新）"
 
 
@@ -66,13 +63,14 @@ async def run_sync(
         log.warning("sync.skipped", connector_id=str(connector_id), reason="already_running")
         return {"status": "skipped", "reason": "already_running"}
 
-    inserted = deduped = duplicated = 0
+    inserted = deduped = duplicated = facts_written = 0
     run_id = None
     try:
         async with SessionLocal() as session:
             conn_repo = ConnectorRepository(session)
             sync_repo = SyncRunRepository(session)
             news_repo = NewsRepository(session)
+            fact_repo = MarketFactRepository(session)
 
             connector_row = await conn_repo.get(connector_id)
             if connector_row is None:
@@ -115,6 +113,17 @@ async def run_sync(
                         duplicated += 1
                         await news_repo.link_duplicate(news_id, connector_id, draft)
 
+                    # ★ 落库分流：带数值事实的条目额外写一张表（文本与数值分表存储）。
+                    #   放在这里而不是各连接器里 —— 渠道不该关心存储长什么样，
+                    #   将来接行情源时这段完全不用改。
+                    if draft.has_metrics:
+                        facts_written += await fact_repo.upsert_from_item(
+                            draft,
+                            connector_id,
+                            raw_document_id=raw_id,
+                            news_item_id=news_id,
+                        )
+
                     await news_repo.mark_raw_normalized(raw_id)
 
                     cursor.last_external_id = raw.external_id
@@ -151,12 +160,25 @@ async def run_sync(
                 "fetched": run.fetched_count,
                 "inserted": inserted,
                 "duplicated": duplicated,
+                "facts_written": facts_written,
                 "failed_segments": failed_segments,
             }
             if run.fetched_count == 0:
                 # ★ 空结果必须给出原因，避免"同步成功但 0 条"的假象
                 stats["empty_reason"] = empty_reason(connector)
                 run.stats = {"empty_reason": stats["empty_reason"]}
+
+            # 老 key 还在跑：给出人话迁移提示，而不是让它静默地按别名跑下去
+            hint = migration_hint(connector_row.key)
+            if hint:
+                log.warning(
+                    "sync.legacy_key",
+                    connector_id=str(connector_id),
+                    key=hint["from_key"],
+                    migrated_to=hint["to_key"],
+                )
+                stats["legacy_key"] = hint
+
             log.info("sync.finished", connector_id=str(connector_id), **stats)
             return stats
     finally:

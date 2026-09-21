@@ -1,7 +1,7 @@
 """M2 主链路集成测试：素材 → 批注 → 检查 → 体检 → 选题 → 触发写作。
 
 需要 Postgres（infra/docker-compose.yml）且已执行 `alembic upgrade head`；
-数据库不可用时整组跳过，不阻塞纯逻辑测试。
+数据库不可用时整组跳过（夹具在 conftest.py，带原因），不阻塞纯逻辑测试。
 
 运行：
     uv run alembic upgrade head
@@ -13,37 +13,16 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-import pytest
 from app.api.deps import DEV_USER_ID, ensure_user
 from app.core.database import SessionLocal
-from app.main import app
 from app.models.enums import ConnectorStatus, ContentType
 from app.models.ingest import SourceConnector
 from app.models.news import NewsItem
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text
+from httpx import AsyncClient
+from sqlalchemy import select
 
 BODY_V1 = "这次扩产是被动应对，因此股价必然下跌，这家公司的估值就是骗局。产能利用率 85%。"
 BODY_V2 = "这次扩产我倾向于认为是被动应对；若 2027 年需求不及预期，产能利用率会承压。"
-
-
-async def _db_ready() -> tuple[bool, str]:
-    try:
-        async with SessionLocal() as s:
-            await s.execute(text("select 1 from materials limit 1"))
-        return True, ""
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)[:160]
-
-
-@pytest.fixture
-async def client():
-    ok, reason = await _db_ready()
-    if not ok:
-        pytest.skip(f"数据库未就绪（{reason}）")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 async def _seed_news() -> uuid.UUID:

@@ -4,8 +4,13 @@
 """
 
 from app.connectors import (  # noqa: F401
-    TushareNewsConnector,
+    TushareArticleConnector,
+    TushareFlashConnector,
     available_connectors,
 )
 
-__all__ = ["available_connectors", "TushareNewsConnector"]
+__all__ = [
+    "TushareArticleConnector",
+    "TushareFlashConnector",
+    "available_connectors",
+]

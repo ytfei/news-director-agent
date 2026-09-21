@@ -14,13 +14,42 @@ from sqlalchemy import Select, cast, func, select, text
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.connectors.base import NewsDraft
+from app.connectors.base import NormalizedItem
 from app.lib.hash import content_hash, hamming_distance, payload_hash, simhash64
 from app.models.ingest import RawDocument
 from app.models.news import NewsCluster, NewsItem, NewsItemRelation, NewsItemSymbol
 
 SIMHASH_WINDOW = timedelta(days=7)
 SIMHASH_MAX_DISTANCE = 3
+
+
+def _source_ref(connector_id: uuid.UUID, draft: NormalizedItem) -> dict:
+    """跨源登记里的一条来源。带 channel 才能回答"这条是被哪家先报的"。"""
+    ref = {
+        "connector_id": str(connector_id),
+        "external_id": draft.external_id,
+        "source_name": draft.source_name,
+        "url": draft.url,
+    }
+    if draft.provenance.channel:
+        ref["channel"] = draft.provenance.channel
+    return ref
+
+
+def _raw_meta(draft: NormalizedItem) -> dict:
+    """`news_items.raw_meta` 是既有 jsonb 列（本期不新增列）。
+
+    把两个扩展通道里"值得留住"的部分收进来：
+    - attributes：渠道元信息（如 tushare 的 channels 分类）
+    - provenance：这一条从哪个连接器/接口/渠道来
+    """
+    meta = dict(draft.extra)
+    if draft.attributes:
+        meta["attributes"] = draft.attributes
+    provenance = draft.provenance.model_dump(mode="json", exclude_none=True)
+    if provenance:
+        meta["provenance"] = provenance
+    return meta
 
 
 class NewsRepository:
@@ -58,7 +87,7 @@ class NewsRepository:
 
     async def upsert_draft(
         self,
-        draft: NewsDraft,
+        draft: NormalizedItem,
         connector_id: uuid.UUID,
         raw_document_id: uuid.UUID | None = None,
     ) -> tuple[uuid.UUID, bool]:
@@ -78,15 +107,17 @@ class NewsRepository:
             if found is not None:
                 return found, False
 
-        chash = content_hash(draft.title, draft.content)
-        shash = simhash64(f"{draft.title}\n{draft.content or ''}")
+        # ★ title 可空：数值型条目没有标题，统一走 display_title 兜底（列是 NOT NULL）
+        title = draft.display_title
+        chash = content_hash(title, draft.content)
+        shash = simhash64(f"{title}\n{draft.content or ''}")
 
         values = {
             "raw_document_id": raw_document_id,
             "connector_id": connector_id,
             "external_id": draft.external_id,
             "content_type": draft.content_type,
-            "title": draft.title,
+            "title": title,
             "summary": draft.summary,
             "content": draft.content,
             "content_length": len(draft.content or ""),
@@ -100,15 +131,8 @@ class NewsRepository:
             "market_scope": draft.market_scope,
             "industries": draft.industries,
             "entities": draft.entities,
-            "source_refs": [
-                {
-                    "connector_id": str(connector_id),
-                    "external_id": draft.external_id,
-                    "source_name": draft.source_name,
-                    "url": draft.url,
-                }
-            ],
-            "raw_meta": draft.extra,
+            "source_refs": [_source_ref(connector_id, draft)],
+            "raw_meta": _raw_meta(draft),
         }
 
         stmt = (
@@ -136,7 +160,7 @@ class NewsRepository:
 
         return news_id, inserted
 
-    async def _attach_symbols(self, news_id: uuid.UUID, draft: NewsDraft) -> None:
+    async def _attach_symbols(self, news_id: uuid.UUID, draft: NormalizedItem) -> None:
         for code in draft.symbols:
             stmt = (
                 insert(NewsItemSymbol)
@@ -145,7 +169,9 @@ class NewsRepository:
             )
             await self.session.execute(stmt)
 
-    async def _assign_cluster(self, news_id: uuid.UUID, draft: NewsDraft, shash: int) -> None:
+    async def _assign_cluster(
+        self, news_id: uuid.UUID, draft: NormalizedItem, shash: int
+    ) -> None:
         """规则版归簇（M1）：7 天内 simhash 汉明距离 <= 3 视为同一事件。
 
         ScoutAgent 上线后替换为模型判定；表结构不变。
@@ -177,7 +203,7 @@ class NewsRepository:
 
         if cluster_id is None:
             cluster = NewsCluster(
-                title=draft.title[:200],
+                title=draft.display_title[:200],
                 first_seen_at=draft.published_at,
                 last_seen_at=draft.published_at,
                 member_count=1,
@@ -212,20 +238,11 @@ class NewsRepository:
         )
 
     async def link_duplicate(
-        self, news_id: uuid.UUID, connector_id: uuid.UUID, draft: NewsDraft | None = None
+        self, news_id: uuid.UUID, connector_id: uuid.UUID, draft: NormalizedItem | None = None
     ) -> None:
         """跨源命中：登记来源并刷新簇的 source_count。"""
         if draft is not None:
-            ref = json.dumps(
-                [
-                    {
-                        "connector_id": str(connector_id),
-                        "external_id": draft.external_id,
-                        "source_name": draft.source_name,
-                        "url": draft.url,
-                    }
-                ]
-            )
+            ref = json.dumps([_source_ref(connector_id, draft)])
             await self.session.execute(
                 text(
                     "UPDATE news_items SET source_refs = source_refs || CAST(:ref AS jsonb) WHERE id = :id"

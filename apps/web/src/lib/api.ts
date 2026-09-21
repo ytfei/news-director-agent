@@ -291,30 +291,50 @@ export interface ProjectDetail {
 
 // ---------------- 数据源（M1） ----------------
 
+/** 连接器声明的配置项 —— 前端据此**动态渲染**表单，不需要认识任何具体连接器。 */
+export interface ConfigField {
+  key: string
+  label: string
+  type: 'text' | 'select' | 'multiselect' | 'number' | 'boolean'
+  options: { value: string; label: string }[]
+  default?: unknown
+  required: boolean
+  help?: string | null
+}
+
+export interface ConnectorCapability {
+  content_types: string[]
+  supports_incremental: boolean
+  supports_backfill: boolean
+  rate_limit_per_min: number | null
+  requires_credentials: boolean
+  /** 该连接器要用户填什么；空数组 = 无需配置 */
+  config_schema?: ConfigField[]
+  /** 是否会产出数值事实（落 market_facts） */
+  emits_metrics?: boolean
+}
+
 export interface Connector {
   id: string
   key: string
   display_name: string
   status: string
   config: Record<string, unknown>
-  capability: {
-    content_types: string[]
-    supports_incremental: boolean
-    supports_backfill: boolean
-    rate_limit_per_min: number | null
-    requires_credentials: boolean
-  }
+  capability: ConnectorCapability
   schedule_cron: string | null
   next_run_at: string | null
   last_run_at: string | null
   consecutive_failures: number
   last_error: string | null
+  /** 该行的 key 已被拆分/改名时的迁移提示（只提示，不自动改数据） */
+  key_migrated_to?: string | null
+  migration_note?: string | null
 }
 
 export interface AvailableConnector {
   key: string
   name: string
-  capability: Connector['capability']
+  capability: ConnectorCapability
 }
 
 export interface SyncStats {
@@ -323,8 +343,12 @@ export interface SyncStats {
   fetched: number
   inserted: number
   duplicated: number
+  /** 本同步写入的数值事实条数（文本与数值分表存储） */
+  facts_written?: number
   failed_segments: { api: string; error: string }[]
   empty_reason?: string
+  /** 老 key 仍在跑时的迁移提示 */
+  legacy_key?: { from_key: string; to_key: string; note: string }
 }
 
 export interface SyncRun {
@@ -338,11 +362,13 @@ export interface SyncRun {
   finished_at: string | null
 }
 
-/** 凭据 / 接口权限探测结果 */
+/** 接口 / 来源的权限与数据探测结果（键是接口名或来源标识） */
 export interface ProbeResult {
   ok: boolean
   rows: number
   reason: string
+  /** 人话名称（如"财联社"）—— 快讯按来源探测时必须有 */
+  label?: string
 }
 
 // ---------------- 请求封装 ----------------
@@ -542,6 +568,10 @@ export const api = {
   listConnectors: () => request<Connector[]>('/connectors'),
   createConnector: (key: string, config?: Record<string, unknown>) =>
     request<Connector>('/connectors', { method: 'POST', body: JSON.stringify({ key, config: config ?? {} }) }),
+  patchConnector: (
+    id: string,
+    input: { display_name?: string; config?: Record<string, unknown>; schedule_cron?: string },
+  ) => request<Connector>(`/connectors/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteConnector: (id: string) => request<void>(`/connectors/${id}`, { method: 'DELETE' }),
   validateConnector: (id: string) =>
     request<{ ok: boolean; message: string }>(`/connectors/${id}/validate`, { method: 'POST' }),

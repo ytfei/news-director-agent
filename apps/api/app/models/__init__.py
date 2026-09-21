@@ -7,6 +7,7 @@ Alembic 的 `target_metadata` 依赖这些导入；新增模型文件时在这�
 from app.models.agent import AgentRun, AgentStep, Notification, UsageRecord
 from app.models.base import Base
 from app.models.ingest import RawDocument, SourceConnector, SyncRun
+from app.models.market import MarketFact
 from app.models.material import Annotation, AnnotationVersion, Material, MaterialTopic, Topic
 from app.models.news import (
     NewsCluster,
@@ -44,6 +45,7 @@ __all__ = [
     "AgentStep",
     "UsageRecord",
     "Notification",
+    "MarketFact",
     "Topic",
     "Material",
     "MaterialTopic",
