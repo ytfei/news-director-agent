@@ -199,9 +199,16 @@ else:
     line(WARN, "未配置 OPENAI_API_KEY", "向量化与 LLM 降级为规则版；填 apps/api/.env")
 line(
     OK,
-    f"LLM_MODEL={settings.LLM_MODEL}",
-    "推理模型：token 多为 reasoning，成本与延迟高" if settings.LLM_IS_REASONING else "",
+    "三档模型已配置",
+    f"pro={settings.LLM_MODEL_PRO} · turbo={settings.LLM_MODEL_TURBO} · "
+    f"lite={settings.LLM_MODEL_LITE}（默认 {settings.LLM_TIER_DEFAULT}）",
 )
+if settings.LLM_IS_REASONING:
+    line(
+        WARN,
+        "三档均为推理模型（reasoning 占 97~100%）",
+        "核查类任务单次 48~108s，远超 8s 目标 → 默认路径必须保留规则版，深度检查异步",
+    )
 line(OK, f"EMBEDDING_MODEL={settings.EMBEDDING_MODEL}", f"dim={settings.EMBEDDING_DIM}")
 if settings.EMBEDDING_DIM > 2000:
     line(

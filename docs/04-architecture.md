@@ -88,8 +88,8 @@ flowchart TB
 | Web | **FastAPI** | async 原生 + Pydantic 集成 + OpenAPI 自动生成 | Litestar（团队更偏好时） |
 | Agent 编排 | **LangGraph 1.x** | 唯一能同时表达**循环 + 并行 + 中断/恢复 + 持久化状态**的成熟方案；HITL 是一等公民 | 自研状态机（不必要，成本更高） |
 | Agent 封装 | **deepagents** | 直接给到 planning / subagent / 虚拟 FS / skills 四个能力，避免重复造轮子 | 手写 middleware（当 deepagents 不满足时局部替换） |
-| **LLM 供应商** | **火山方舟 Ark（OpenAI 兼容协议）**：`OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/plan/v3`；对话 **doubao-seed-evolving**；向量 **doubao-embedding-vision（实测 2048 维）** | 中文财经场景；统一走 `ModelProvider`，换供应商 / 私有化只改 `OPENAI_BASE_URL` | 私有化换自建 vLLM / Ollama 的 OpenAI 兼容端点（**协议不变，零代码改动**） |
-| **轻量级模型** | `LLM_MODEL_LIGHT`（当前留空 = 复用主模型） | ★ `doubao-seed-evolving` 是**推理模型**：实测一次回答 1145 completion token 中 **1096 是 reasoning（96%）**，成本与延迟都高。打标 / 聚类这类简单任务**不应**用它 | 接入便宜模型后只需填 `LLM_MODEL_LIGHT`，`light=True` 的调用自动走它 |
+| **LLM 档位** | **pro** `doubao-seed-2.1-pro`（1M，旗舰深度推理）／ **turbo** `doubao-seed-2.1-turbo`（256k，均衡主力，**默认档**）／ **lite** `doubao-seed-2.1-lite`（256k，轻量批量） | 三款**实测均为推理模型**（reasoning 占 97~100%）。同一分类任务：pro 194tok/6.5s、**turbo 36tok/2.1s**、lite 407tok/8.9s → **turbo 是甜点**；**lite 在简单任务上并不比 turbo 省**（"轻量"是能力定位，不是思考更少） | 私有化换自建 vLLM / Ollama 的 OpenAI 兼容端点（协议不变，零代码改动） |
+| **Embedding** | `doubao-embedding-vision`（实测 2048 维） | 已定案；2048 > pgvector 索引上限 2000，暂走全表扫描 | 换模型需同步 `EMBEDDING_DIM` 并重建向量列 |
 | 网页检索 | Tavily / 博查（国内） | **ResearcherAgent 必备**，tushare 覆盖不到海外与自由文本源 | 自建爬虫（量起来后） |
 | 校验 | **Pydantic v2** | API schema 与 `with_structured_output` 复用同一套模型 | — |
 | ORM | **SQLAlchemy 2.0 async** | 类型友好、支持 async、生态成熟 | SQLModel（会牺牲灵活性） |
@@ -795,6 +795,30 @@ class WorkerSettings:
 
 > `store` 是 M4 "越用越懂你" 的技术基础：`uniqueness` 轨道查历史观点，
 > `WriterAgent` 从 store 取 few-shot 用户历史成稿，风格克隆效果随时间变好。
+
+---
+
+### 5.6 模型档位路由（场景 → 档位）
+
+路由表在 `app/services/model_provider.py` 的 `DEFAULT_TIER`，可用 `LLM_TIER_OVERRIDES`
+按场景覆盖，无需改代码。
+
+| 场景（Task） | 档位 | 依据 |
+| --- | --- | --- |
+| `classify` 打标 / 分类 / 聚类 | **turbo** | 简单高频；turbo 实测 36tok/2.1s，全场最省 |
+| `extract` 实体 / 关键词抽取 | **turbo** | 同上 |
+| `title` 标题 / 摘要候选 | **turbo** | 量中等，需要一点质量 |
+| `summarize` 摘要 | **lite** | 批量、高吞吐 |
+| `fact_check` 事实复核（对照 FactCard） | **lite** | 对照型任务，不需要长链推理 |
+| `review` 三轨检查 | **turbo** | 需要推理质量；pro 太慢（核查 108s），lite 复杂推理弱 |
+| `write_section` 段落写作 | **turbo** | 局部任务量大，turbo 全能力且价约 pro 一半 |
+| `style` 风格统一 | **turbo** | 同上 |
+| `write_plan` 大纲规划 | **pro** | **唯一**值得用 pro 的场景：决定全文结构，需要长链推理 |
+
+> **★ 延迟红线（实测）**：核查类任务单次 **48~108 秒**（pro 108s / turbo 56s / lite 48s），
+> 远超 `docs/01` §6 的「检查单条 < 8s」。由此确定两条硬规则：
+> 1. **默认检查路径必须保留规则版**（`rules-v1`），LLM 检查作为可选的"深度检查"；
+> 2. 凡是走 LLM 的检查 / 写作，**必须异步**（arq + SSE 进度），不能在请求里同步等待。
 
 ---
 

@@ -1,19 +1,28 @@
-"""模型层：OpenAI 兼容协议的统一入口。
+"""模型层：OpenAI 兼容协议的统一入口 + 按场景路由档位。
 
 设计要点（docs/04 §10.1.1 私有化前置）：
-- 所有模型调用走这里，上层不直接依赖 SDK → 换供应商 / 换私有化部署只改配置
+- 所有模型调用走这里，上层不直接依赖 SDK → 换供应商 / 私有化只改配置
 - base_url 可指向火山方舟 Ark、OpenAI、自建 vLLM / Ollama 的 OpenAI 兼容端点
-- 没有配置 API Key 时 `enabled=False`，调用方降级而不是崩溃（M1/M2 的规则链路仍可跑）
+- 没有配置 API Key 时 `enabled=False`，调用方降级而不是崩溃
 
-实测记录（2026-09-24）：
-- `doubao-embedding-vision` → 2048 维
-- `doubao-seed-evolving` → 推理模型，completion token 中约 96% 是 reasoning_tokens
+档位（seed 2.1 系列，2026-09-25 实测）：
+    pro   1M   旗舰深度推理    分类 194tok/10s · 核查 4285tok/108s
+    turbo 256k 均衡主力        分类  37tok/ 2s · 核查 3613tok/ 56s   ← 甜点
+    lite  256k 轻量通用        分类 201tok/ 5s · 核查 3055tok/ 48s
+
+三条实测结论，直接决定了下面的路由表：
+1. 三款**都是推理模型**（reasoning 占 97~100%），没有"非推理"选项可用；
+2. lite 在简单任务上**并不比 turbo 省**（201 vs 37）—— "轻量"是能力定位，
+   不是思考更少，所以默认档是 turbo 而不是 lite；
+3. 核查类任务单次要 48~108 秒，远超「检查单条 < 8s」的目标
+   → 因此 REVIEW 走 LLM 时必须异步，默认路径仍应保留规则版。
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import structlog
@@ -21,6 +30,44 @@ import structlog
 from app.core.config import settings
 
 log = structlog.get_logger()
+
+
+class Tier(str, Enum):
+    PRO = "pro"
+    TURBO = "turbo"
+    LITE = "lite"
+
+
+class Task(str, Enum):
+    """场景标识。`LLM_TIER_OVERRIDES` 用的就是这个枚举的 value。"""
+
+    CLASSIFY = "classify"  # 打标 / 分类 / 聚类
+    EXTRACT = "extract"  # 实体 / 关键词抽取
+    SUMMARIZE = "summarize"  # 摘要
+    REVIEW = "review"  # 三轨检查（深度模式）
+    FACT_CHECK = "fact_check"  # 事实复核（对照 FactCard）
+    WRITE_PLAN = "write_plan"  # 大纲规划
+    WRITE_SECTION = "write_section"  # 段落写作
+    STYLE = "style"  # 风格统一
+    TITLE = "title"  # 标题 / 摘要候选
+
+
+# 场景 → 默认档位。理由见文件头实测数据。
+DEFAULT_TIER: dict[Task, Tier] = {
+    # 简单高频：turbo 实测只要 37 tokens / 2s，是全场最省
+    Task.CLASSIFY: Tier.TURBO,
+    Task.EXTRACT: Tier.TURBO,
+    Task.TITLE: Tier.TURBO,
+    # 批量类：lite 高吞吐
+    Task.SUMMARIZE: Tier.LITE,
+    Task.FACT_CHECK: Tier.LITE,
+    # 需要推理质量：turbo 全能力且价约 pro 一半；pro 太慢（108s）
+    Task.REVIEW: Tier.TURBO,
+    Task.WRITE_SECTION: Tier.TURBO,
+    Task.STYLE: Tier.TURBO,
+    # 只有"复杂长链推理"才值得用 pro：大纲规划决定全文结构
+    Task.WRITE_PLAN: Tier.PRO,
+}
 
 
 @dataclass
@@ -32,6 +79,10 @@ class TokenUsage:
     @property
     def total(self) -> int:
         return self.input + self.output
+
+    @property
+    def reasoning_ratio(self) -> float:
+        return self.reasoning / max(self.output, 1)
 
     def merge(self, other: TokenUsage) -> TokenUsage:
         self.input += other.input
@@ -51,10 +102,33 @@ class ModelError(RuntimeError):
 class ModelProvider:
     base_url: str = settings.OPENAI_BASE_URL
     api_key: str | None = settings.OPENAI_API_KEY
-    llm_model: str = settings.LLM_MODEL
-    llm_model_light: str | None = settings.LLM_MODEL_LIGHT
-    embedding_model: str = settings.EMBEDDING_MODEL
     _client: Any = field(default=None, init=False, repr=False)
+
+    # ---------------------------------------------------------------- 档位
+    @property
+    def models(self) -> dict[Tier, str]:
+        return {
+            Tier.PRO: settings.LLM_MODEL_PRO,
+            Tier.TURBO: settings.LLM_MODEL_TURBO,
+            Tier.LITE: settings.LLM_MODEL_LITE,
+        }
+
+    def tier_for(self, task: Task | None) -> Tier:
+        """场景 → 档位，支持配置覆盖。"""
+        default = DEFAULT_TIER.get(task, Tier(settings.LLM_TIER_DEFAULT)) if task else Tier(
+            settings.LLM_TIER_DEFAULT
+        )
+        if task:
+            override = settings.LLM_TIER_OVERRIDES.get(task.value)
+            if override:
+                try:
+                    return Tier(override)
+                except ValueError:
+                    log.warning("llm.bad_tier_override", task=task.value, value=override)
+        return default
+
+    def model_for(self, tier: Tier) -> str:
+        return self.models[tier]
 
     # ---------------------------------------------------------------- 基础
     @property
@@ -76,16 +150,6 @@ class ModelProvider:
         return self._client
 
     @property
-    def llm(self) -> str:
-        """默认对话模型。"""
-        return self.llm_model
-
-    @property
-    def llm_light(self) -> str:
-        """轻量模型（打标 / 聚类等简单任务）。未配置时回落到主模型。"""
-        return self.llm_model_light or self.llm_model
-
-    @property
     def embedding_dim(self) -> int:
         """实际写入数据库的维度（考虑截断）。"""
         return settings.EMBEDDING_TRUNCATE_TO or settings.EMBEDDING_DIM
@@ -95,18 +159,22 @@ class ModelProvider:
         self,
         messages: list[dict[str, str]],
         *,
-        model: str | None = None,
+        task: Task | None = None,
+        tier: Tier | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_format: dict | None = None,
-        light: bool = False,
     ) -> tuple[str, TokenUsage]:
-        """返回 (文本, token 用量)。推理模型不传 temperature（部分端点会报错）。"""
+        """返回 (文本, token 用量)。
+
+        档位由 `tier` 显式指定，或由 `task` 路由得出。
+        推理模型不传 temperature（部分端点会拒绝）。
+        """
         client = self._ensure_client()
-        use_model = model or (self.llm_light if light else self.llm)
+        use_tier = tier or self.tier_for(task)
+        use_model = self.model_for(use_tier)
 
         kwargs: dict[str, Any] = {"model": use_model, "messages": messages}
-        # 推理模型（如 doubao-seed-evolving）不接受 temperature
         if temperature is not None and not settings.LLM_IS_REASONING:
             kwargs["temperature"] = temperature
         if max_tokens is not None:
@@ -128,25 +196,27 @@ class ModelProvider:
             if details:
                 usage.reasoning = getattr(details, "reasoning_tokens", 0) or 0
 
-        text = resp.choices[0].message.content or ""
-        log.info("llm.chat", model=use_model, **usage.as_dict())
-        return text, usage
+        log.info(
+            "llm.chat",
+            model=use_model,
+            tier=use_tier.value,
+            task=task.value if task else None,
+            **usage.as_dict(),
+        )
+        return resp.choices[0].message.content or "", usage
 
     async def chat_json(
         self,
         messages: list[dict[str, str]],
         *,
-        model: str | None = None,
-        light: bool = False,
+        task: Task | None = None,
+        tier: Tier | None = None,
     ) -> tuple[dict | list | None, TokenUsage]:
-        """要求模型返回 JSON。失败时抛 ModelError，由调用方决定降级。"""
+        """要求模型返回 JSON。失败抛 ModelError，由调用方决定降级。"""
         import json
 
         text, usage = await self.chat(
-            messages,
-            model=model,
-            light=light,
-            response_format={"type": "json_object"},
+            messages, task=task, tier=tier, response_format={"type": "json_object"}
         )
         try:
             return json.loads(text), usage
@@ -170,17 +240,11 @@ class ModelProvider:
             async with sem:
                 try:
                     resp = await client.embeddings.create(
-                        model=self.embedding_model, input=batch
+                        model=settings.EMBEDDING_MODEL, input=batch
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.error("llm.embed_failed", error=str(exc)[:300])
                     raise ModelError(f"向量化失败：{exc}") from exc
-                if resp.usage:
-                    log.debug(
-                        "llm.embed",
-                        batch=len(batch),
-                        prompt_tokens=getattr(resp.usage, "prompt_tokens", 0),
-                    )
                 return [self._fit(d.embedding) for d in resp.data]
 
         results = await asyncio.gather(*[one(b) for b in batches])
@@ -191,10 +255,10 @@ class ModelProvider:
         return vecs[0] if vecs else []
 
     def _fit(self, vec: list[float]) -> list[float]:
-        """对齐到实际存储维度：截断或补零。
+        """对齐到实际存储维度（截断或补零）。
 
         ★ pgvector 索引上限 2000 维，而 doubao-embedding-vision 是 2048 维。
-        若配置了 EMBEDDING_TRUNCATE_TO，对所有向量统一截断，余弦相似度仍可用（精度下降）。
+        配置 EMBEDDING_TRUNCATE_TO 后对所有向量统一截断，余弦相似度仍可用（精度下降）。
         """
         target = self.embedding_dim
         if len(vec) == target:
@@ -215,6 +279,9 @@ def get_model_provider() -> ModelProvider:
 
 
 __all__ = [
+    "Tier",
+    "Task",
+    "DEFAULT_TIER",
     "TokenUsage",
     "ModelError",
     "ModelProvider",

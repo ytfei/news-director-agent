@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.lib.hash import simhash64
 from app.models.news import NewsItem
-from app.services.model_provider import ModelError, get_model_provider
+from app.services.model_provider import ModelError, Task, get_model_provider
 
 log = structlog.get_logger()
 
@@ -94,7 +94,8 @@ async def llm_tag(text: str) -> list[str] | None:
         {"role": "user", "content": text[:2000]},
     ]
     try:
-        data, usage = await provider.chat_json(messages, light=True)
+        # 分类属简单高频任务 → 路由到 turbo（实测 37 tokens / 2s）
+        data, usage = await provider.chat_json(messages, task=Task.CLASSIFY)
     except ModelError as exc:
         log.warning("enrich.llm_tag_failed", error=str(exc)[:200])
         return None

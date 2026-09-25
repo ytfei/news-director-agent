@@ -142,19 +142,36 @@ npm run build                        # tsc --noEmit + vite build 通过
 
 | 项 | 说明 |
 | --- | --- |
-| 对话 | `doubao-seed-evolving` —— **推理模型** |
+| 三档对话 | `pro` 深度推理（1M）／ `turbo` 均衡主力（256k，**默认**）／ `lite` 轻量批量（256k） |
 | 向量 | `doubao-embedding-vision` —— 实测 **2048 维** |
 | 抽象 | `ModelProvider`（chat / chat_json / embed / embed_one），无 key 时降级不崩溃 |
+| 路由 | `Task` 枚举 → `DEFAULT_TIER`，可用 `LLM_TIER_OVERRIDES` 覆盖（见 `docs/04 §5.6`） |
 | 接入点 | `enrich_service` 真实写入 `news_items.embedding`（已验证 `vector_dims=2048`） |
 | 降级策略 | 模型不可用 → 规则结果照常入库，embedding 留空，同步链路不被拖垮 |
 | 自检 | `make models`（真机探测，含维度一致性与 reasoning 占比）；`make doctor` 只校验配置不花钱 |
 
-**⚠️ 成本警告（实测）**：`doubao-seed-evolving` 一次回答 1145 completion token 中
-**1096 是 reasoning（96%）**。因此：
+**实测（2026-09-25，同一 prompt 对比两次，结论一致）**
 
-- `ENRICH_USE_LLM` 默认 **false**（逐条打标成本不可接受）
-- 预留 `LLM_MODEL_LIGHT`：接入便宜模型后，`light=True` 的调用自动走它
-- 推理 token 已单独统计进 `TokenUsage.reasoning`，成本可观测
+| 任务 | pro | turbo | lite |
+| --- | --- | --- | --- |
+| 简单分类 | 194 tok / 6.5s | **36 tok / 2.1s** | 407 tok / 8.9s |
+| 事实核查 | 4285 tok / **108s** | 3613 tok / 56s | 3055 tok / 48s |
+| 核查质量 | 3/3 命中 | 3/3 命中 | 3/3 命中 |
+
+三条结论：
+
+1. **三款都是推理模型**（reasoning 占 97~100%），这个接入点上没有"非推理"选项
+2. **turbo 是甜点**：简单任务只要 36 tok，是 pro 的 1/5、lite 的 1/11
+3. **反直觉**：lite 在简单任务上**并不比 turbo 省**（407 vs 36）
+   —— "轻量"是能力定位，不是思考更少
+
+**★ 延迟红线（最重要的约束）**：核查类任务单次 **48~108 秒**，
+远超「检查单条 < 8s」。由此确定的两条硬规则（已写进 `docs/04 §5.6`）：
+
+- [x] 默认检查路径保留规则版（`rules-v1`），LLM 检查作为可选"深度检查"
+- [ ] **深度检查必须异步**（arq + SSE 进度），不能在请求里同步等待 —— 待实现
+- [ ] 写作（pro 规划）同理，必须异步流式
+- [ ] `ENRICH_USE_LLM` 目前默认 false；turbo 分类仅 36 tok，M2 收尾时可评估打开
 
 ---
 

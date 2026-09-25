@@ -26,10 +26,14 @@ x-api-env: &api-env
   # ---- 模型（OpenAI 兼容协议；火山方舟 Ark） ----
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan/v3}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  LLM_MODEL: ${LLM_MODEL:-doubao-seed-evolving}
+  # 三档：pro 只用于复杂规划（慢），turbo 为默认甜点，lite 用于批量
+  LLM_MODEL_PRO: ${LLM_MODEL_PRO:-doubao-seed-2.1-pro}
+  LLM_MODEL_TURBO: ${LLM_MODEL_TURBO:-doubao-seed-2.1-turbo}
+  LLM_MODEL_LITE: ${LLM_MODEL_LITE:-doubao-seed-2.1-lite}
+  LLM_TIER_DEFAULT: ${LLM_TIER_DEFAULT:-turbo}
+  LLM_TIER_OVERRIDES: ${LLM_TIER_OVERRIDES:-{}}
   LLM_IS_REASONING: ${LLM_IS_REASONING:-true}
   LLM_TIMEOUT: ${LLM_TIMEOUT:-180}
-  LLM_MODEL_LIGHT: ${LLM_MODEL_LIGHT:-}
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-doubao-embedding-vision}
   EMBEDDING_TRUNCATE_TO: ${EMBEDDING_TRUNCATE_TO:-0}
   # 默认关：推理模型逐条打标成本不可接受

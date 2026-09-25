@@ -44,18 +44,28 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/plan/v3"
     OPENAI_API_KEY: str | None = None
 
-    # 大语言模型
-    LLM_MODEL: str = "doubao-seed-evolving"
-    # ★ doubao-seed-evolving 是推理模型：一次回答里绝大部分 token 是 reasoning_tokens
-    #   （实测 1180 completion 中 1136 为推理）。成本与延迟都高，
-    #   所以「打标 / 聚类」这类简单任务不要用它（见 LLM_MODEL_LIGHT）。
+    # ---- 三档模型（seed 2.1 系列）----
+    # ★ 实测：三款**都是推理模型**（reasoning token 占 97~100%）。
+    #   同一 prompt 对比（2026-09-25）：
+    #     pro   1M 上下文 · 最强长链推理      分类 194tok/10s · 核查 4285tok/108s
+    #     turbo 256k · 推理强、价约 pro 一半   分类  37tok/ 2s · 核查 3613tok/ 56s  ← 甜点
+    #     lite  256k · 低成本高吞吐            分类 201tok/ 5s · 核查 3055tok/ 48s
+    # ★ 反直觉：lite 在简单任务上**并不比 turbo 省**（201 vs 37）。
+    #   "轻量"指能力定位，不是思考更少。因此默认档是 turbo 而非 lite。
+    LLM_MODEL_PRO: str = "doubao-seed-2.1-pro"
+    LLM_MODEL_TURBO: str = "doubao-seed-2.1-turbo"
+    LLM_MODEL_LITE: str = "doubao-seed-2.1-lite"
+    # 未显式指定档位时的默认
+    LLM_TIER_DEFAULT: str = "turbo"
+    # 按场景覆盖档位：{"write_plan":"pro","review":"turbo"}，键见 Task 枚举
+    LLM_TIER_OVERRIDES: dict[str, str] = {}
+
     LLM_IS_REASONING: bool = True
     LLM_TIMEOUT: int = 180
     LLM_MAX_RETRIES: int = 2
-    # 轻量模型：留空表示暂时复用 LLM_MODEL（接入更便宜的模型后在此配置）
-    LLM_MODEL_LIGHT: str | None = None
 
-    # 是否用 LLM 做打标（默认关：doubao-seed-evolving 是推理模型，逐条打标成本不可接受）
+    # 是否用 LLM 做打标。turbo 在分类任务实测仅 37 tokens / 2s，成本可接受；
+    # 但仍默认关：先让规则版跑稳，M2 收尾时评估是否切换
     ENRICH_USE_LLM: bool = False
 
     # Embedding
@@ -72,8 +82,8 @@ class Settings(BaseSettings):
     # 单批检查并发上限（其余排队），避免同时打满 LLM
     REVIEW_MAX_CONCURRENCY: int = 5
 
-    # 向量维度：由 Spike #4 定模型后固定，换维度需重建 HNSW
-    EMBEDDING_DIM: int = 1024
+    # 向量维度：doubao-embedding-vision 实测 2048（已定案），换维度需重建向量列
+    EMBEDDING_DIM: int = 2048
 
     @property
     def is_dev(self) -> bool:
