@@ -45,6 +45,10 @@ install: ## 安装后端与前端依赖（uv sync + npm ci）
 doctor: ## 环境自检：配置 / DB / Redis / 迁移版本 / 向量维度 / 预置数据
 	cd $(API_DIR) && uv run python scripts/doctor.py
 
+.PHONY: models
+models: ## 模型连通性真机自检（embedding 维度 + 对话 + reasoning token 占比）
+	cd $(API_DIR) && uv run python scripts/model_smoke.py
+
 # ---------------------------------------------------------------- 本地开发
 
 ##@ 本地开发（依赖走 Docker，代码本地跑）

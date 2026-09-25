@@ -88,7 +88,8 @@ flowchart TB
 | Web | **FastAPI** | async 原生 + Pydantic 集成 + OpenAPI 自动生成 | Litestar（团队更偏好时） |
 | Agent 编排 | **LangGraph 1.x** | 唯一能同时表达**循环 + 并行 + 中断/恢复 + 持久化状态**的成熟方案；HITL 是一等公民 | 自研状态机（不必要，成本更高） |
 | Agent 封装 | **deepagents** | 直接给到 planning / subagent / 虚拟 FS / skills 四个能力，避免重复造轮子 | 手写 middleware（当 deepagents 不满足时局部替换） |
-| **LLM 供应商** | 打标/聚类：**DeepSeek-V3 / Qwen-Plus**；检查/写作：**Claude Sonnet 4.x 或 GPT-4o 级**；embedding：**BGE-M3 / Qwen3-Embedding（1024 维）** | 中文财经场景 + 成本可控；强模型只在"检查 + 写作"两处用 | 私有化交付时换本地部署模型（Qwen 系列），走同一 `ModelProvider` 抽象 |
+| **LLM 供应商** | **火山方舟 Ark（OpenAI 兼容协议）**：`OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/plan/v3`；对话 **doubao-seed-evolving**；向量 **doubao-embedding-vision（实测 2048 维）** | 中文财经场景；统一走 `ModelProvider`，换供应商 / 私有化只改 `OPENAI_BASE_URL` | 私有化换自建 vLLM / Ollama 的 OpenAI 兼容端点（**协议不变，零代码改动**） |
+| **轻量级模型** | `LLM_MODEL_LIGHT`（当前留空 = 复用主模型） | ★ `doubao-seed-evolving` 是**推理模型**：实测一次回答 1145 completion token 中 **1096 是 reasoning（96%）**，成本与延迟都高。打标 / 聚类这类简单任务**不应**用它 | 接入便宜模型后只需填 `LLM_MODEL_LIGHT`，`light=True` 的调用自动走它 |
 | 网页检索 | Tavily / 博查（国内） | **ResearcherAgent 必备**，tushare 覆盖不到海外与自由文本源 | 自建爬虫（量起来后） |
 | 校验 | **Pydantic v2** | API schema 与 `with_structured_output` 复用同一套模型 | — |
 | ORM | **SQLAlchemy 2.0 async** | 类型友好、支持 async、生态成熟 | SQLModel（会牺牲灵活性） |
@@ -1052,8 +1053,8 @@ v1 的 SaaS 架构必须能闭网运行，因此以下组件**必须可替换**�
 
 | 组件 | SaaS | 私有化 | 抽象方式 |
 | --- | --- | --- | --- |
-| LLM | Claude / GPT / DeepSeek API | 本地 vLLM / Ollama 部署 Qwen 系列 | `ModelProvider` 协议（**必做**，否则 M3 后改造是灾难） |
-| Embedding | 云端 API | 本地 BGE-M3 | 同上 |
+| LLM | 火山方舟 Ark（OpenAI 兼容）· `doubao-seed-evolving` | 自建 vLLM / Ollama 的 OpenAI 兼容端点 | ✅ `ModelProvider` 已落地（`app/services/model_provider.py`），只改 `OPENAI_BASE_URL` |
+| Embedding | `doubao-embedding-vision`（实测 2048 维） | 本地 BGE-M3 | ✅ 同上，只改 `EMBEDDING_MODEL` / `EMBEDDING_DIM` |
 | 可观测 | LangSmith | **Langfuse 自托管** | `Tracer` 协议；`agent_runs.trace_url` 存各自链接 |
 | 对象存储 | 云 OSS | MinIO（已在 compose 中） | S3 兼容接口，天然一致 |
 | 凭据加密 | KMS | 本地 Fernet（密钥由部署方注入） | `SecretsProvider` 协议 |

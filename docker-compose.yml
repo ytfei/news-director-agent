@@ -23,6 +23,17 @@ x-api-env: &api-env
   # ★ 必须与库中 news_items.embedding 的实际维度一致，否则写入直接报错。
   #   当前库里是 vector(2048)；改这个值 = 需要重建向量列与索引（见 TODO P0-2）。
   EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+  # ---- 模型（OpenAI 兼容协议；火山方舟 Ark） ----
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan/v3}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-doubao-seed-evolving}
+  LLM_IS_REASONING: ${LLM_IS_REASONING:-true}
+  LLM_TIMEOUT: ${LLM_TIMEOUT:-180}
+  LLM_MODEL_LIGHT: ${LLM_MODEL_LIGHT:-}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-doubao-embedding-vision}
+  EMBEDDING_TRUNCATE_TO: ${EMBEDDING_TRUNCATE_TO:-0}
+  # 默认关：推理模型逐条打标成本不可接受
+  ENRICH_USE_LLM: ${ENRICH_USE_LLM:-false}
   TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
   TUSHARE_QPS: ${TUSHARE_QPS:-3.0}
   ARQ_MAX_JOBS: ${ARQ_MAX_JOBS:-8}

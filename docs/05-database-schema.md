@@ -1227,10 +1227,9 @@ ORDER BY hamming LIMIT 20;
 ### 4.8 向量维度与 canonical JSON
 
 ```python
-# 维度：由配置决定，不做硬编码假设（Spike #4 定模型后再固定）
-EMBEDDING_DIM = 1024          # BGE-M3 / Qwen3-Embedding-1024
-# 当前开发环境实际为 2048（EMBEDDING_PROVIDER=volcengine / doubao-embedding-vision）
-# 变更维度 = 重建全部 HNSW 索引：news_items / news_clusters / opinions / user_style_profiles
+# 维度已定案（Spike #4 完成，2026-09-24 真机实测）
+EMBEDDING_DIM = 2048          # doubao-embedding-vision（火山方舟 Ark，OpenAI 兼容协议）
+# 变更维度 = 重建向量列与索引：news_items / news_clusters / opinions / user_style_profiles
 
 # ★ 硬限制（真机验证，2026-09-18）：pgvector 的 HNSW / IVFFlat 索引最多 2000 维。
 #   EMBEDDING_DIM > 2000 时建索引会直接报

@@ -42,7 +42,7 @@
 | 主库 | **PostgreSQL 16** + **pgvector** + **pg_trgm** | 关系 + 向量 + 中文模糊检索一个库搞定，v1 不引入 ES |
 | 缓存 / 队列 | **Redis 7** + **arq**（异步任务队列） | arq 是 async 原生，比 Celery 更贴合；若团队熟悉 Celery 可换 |
 | 对象存储 | S3 兼容（MinIO 本地 / 云 OSS） | 公告 PDF、导出文章、封面图 |
-| **LLM 供应商** | 打标/聚类用 **DeepSeek-V3 / Qwen-Plus**；检查/写作用 **Claude Sonnet 4.x 或 GPT-4o 级**；embedding 用 **BGE-M3 / Qwen3-Embedding** | 中文财经场景 + 成本可控。走 `ModelProvider` 抽象，私有化时换本地 Qwen |
+| **LLM 供应商** | **火山方舟 Ark**（OpenAI 兼容协议）：对话 `doubao-seed-evolving`（推理模型）、向量 `doubao-embedding-vision`（2048 维） | 统一走 `ModelProvider` 抽象；私有化只改 `OPENAI_BASE_URL` 指向自建 vLLM / Ollama，协议不变 |
 | 网页检索 | Tavily / 博查 | ResearcherAgent 的 `web_probe` 依赖它；没有它，事实核查被锁死在 tushare 内 |
 | 可观测 | **LangSmith** + structlog（私有化换 **Langfuse 自托管**） | LangGraph 原生 trace，按 `run_id` 关联业务记录 |
 | 前端 | **React 19 + Vite + TypeScript（SPA）** | **不用 Astro 做主体**，理由见 `04-architecture.md` §8 |

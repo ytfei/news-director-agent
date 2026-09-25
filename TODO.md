@@ -1,7 +1,7 @@
 # TODO · 主理人 Agent
 
-> 状态：**M1 ✅ 数据底座 · M2 ✅ 素材 / 批注 / 体检 / 选题（检查为规则版）**
-> 最后更新：2026-09-20
+> 状态：**M1 ✅ 数据底座 · M2 ✅ 素材 / 批注 / 体检 / 选题（检查为规则版）· 模型层 ✅ 已接入**
+> 最后更新：2026-09-24
 > 相关文档：`docs/01`~`docs/06`；可点击原型：`prototype/`
 
 ---
@@ -136,6 +136,26 @@ npm run build                        # tsc --noEmit + vite build 通过
 - M2 集成测试（5 条，走真库）：幂等标记素材 → 主题筛选 → 批注版本 → 检查出 blocker → 红线未处置时 compose 返回 409 → 采纳/驳回 → 复检 → 可写作 → 触发写作；「无点评素材直接写作（digest 模式）」；无批注时检查返回 422；系统主题与统计；官方提示词已 seed
 - M1 冒烟（5 条）：注册表 / 标准码 / 归一化纯函数 / health + available，以及一条**真机 tushare 同步**（依赖 `.env` 里的 `TUSHARE_TOKEN`，缺失时会 skip —— 注意 skip 与 pass 的区别）
 
+### 1.6 模型层（2026-09-24）
+
+统一走 **OpenAI 兼容协议**（火山方舟 Ark），`app/services/model_provider.py`。
+
+| 项 | 说明 |
+| --- | --- |
+| 对话 | `doubao-seed-evolving` —— **推理模型** |
+| 向量 | `doubao-embedding-vision` —— 实测 **2048 维** |
+| 抽象 | `ModelProvider`（chat / chat_json / embed / embed_one），无 key 时降级不崩溃 |
+| 接入点 | `enrich_service` 真实写入 `news_items.embedding`（已验证 `vector_dims=2048`） |
+| 降级策略 | 模型不可用 → 规则结果照常入库，embedding 留空，同步链路不被拖垮 |
+| 自检 | `make models`（真机探测，含维度一致性与 reasoning 占比）；`make doctor` 只校验配置不花钱 |
+
+**⚠️ 成本警告（实测）**：`doubao-seed-evolving` 一次回答 1145 completion token 中
+**1096 是 reasoning（96%）**。因此：
+
+- `ENRICH_USE_LLM` 默认 **false**（逐条打标成本不可接受）
+- 预留 `LLM_MODEL_LIGHT`：接入便宜模型后，`light=True` 的调用自动走它
+- 推理 token 已单独统计进 `TokenUsage.reasoning`，成本可观测
+
 ---
 
 ## 2. 本次交付暴露的问题
@@ -181,10 +201,27 @@ npm run build                        # tsc --noEmit + vite build 通过
 - [ ] 长期：由 `ScoutAgent` 做模型判定，表结构不变，只替换 `_assign_cluster`
 - **验收**：`source_count ≥ 2` 的簇占比 > 10%
 
-### 2. pgvector 索引维度超限
+### 2. pgvector 索引维度超限 —— 维度已定案，CI 门槛已解除（2026-09-24）
 
-- **现象**：实际生效的 `EMBEDDING_DIM=2048` > HNSW / IVFFlat 上限 2000，建索引报错；迁移里条件化跳过。
-- **★ 现在有三处不一致**（`make doctor` 已能检出）：
+**已解决**：
+
+- [x] 真机实测 `doubao-embedding-vision` = **2048 维**，三处值统一为 2048
+      （库 `vector(2048)` / `apps/api/.env` / compose 默认值 —— 原先 `.env` 写 1024 且被环境变量静默覆盖）
+- [x] 模型层与迁移层用**同一判断**（`CAN_VECTOR_INDEX = DIM <= 2000`），
+      因此 `alembic check` **不再检出差异**（`No new upgrade operations detected`）
+- [x] `enrich` 真实写入 embedding 已验证：库中 `vector_dims = 2048`
+- [x] 文档已更新（`docs/04` 选型表、`docs/05` §4.8）
+
+**剩余（不再是阻塞，但影响检索性能）**：
+
+- [ ] 2048 维 > 2000 → **向量索引建不了**，语义检索退化为全表扫描
+      （当前 1.5k 条可接受；上万条后必须解决）
+- [ ] 方案三选一：① 设 `EMBEDDING_TRUNCATE_TO<=2000`（统一截断，精度下降，可建索引）
+      ② 换 ≤2000 维的 embedding 模型 ③ 接受全表扫描直到数据量成为瓶颈
+- [ ] `make doctor` 目前仍会 WARN「向量索引缺失」—— 这是**预期行为**，不是故障
+
+**现象（保留说明）**：HNSW / IVFFlat 上限 2000 维，超限建索引直接报错。
+迁移与模型层都做了条件化跳过。
   | 位置 | 值 |
   | --- | --- |
   | 数据库 `news_items.embedding` | `vector(2048)` |
@@ -268,6 +305,18 @@ npm run build                        # tsc --noEmit + vite build 通过
 - [ ] 20 个种子主理人 Wizard-of-Oz：愿不愿意写点评？一次写几条？建议采纳率能到 50% 吗？
 - [ ] 打字 vs 语音碎片转写（影响 M3 编辑器形态）
 - **零代码，3~5 天。不达标则回到产品定义，不进 M3。**
+
+---
+
+### 11. 规则版检查 → 真实模型（模型层已就绪，现在可做）
+
+> 前提已具备：`ModelProvider` 可用、embedding 已入库、`TokenUsage` 能统计成本。
+
+- [ ] 用 LLM 替换 `_rules_for` 的三轨，**保留规则版作为兜底与对照**
+- [ ] 先做 `fact` 轨（高精度取向）做对照实验：规则 vs 模型的误报率
+- [ ] 成本约束：推理模型贵 → 优先配 `LLM_MODEL_LIGHT`；批量检查并发 ≤5（P1-11 待 enforce）
+- [ ] 三轨分别统计（事实误报 < 15% / 合规召回 > 95%）
+- **验收**：评测集上模型版优于规则版，且单条成本可接受（成本实测依赖这一条，见 P1-7）
 
 ---
 

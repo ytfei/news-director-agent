@@ -24,6 +24,8 @@ dependencies = [
     # 数据源
     "tushare>=1.4.19",
     "httpx>=0.28",
+    # 模型（OpenAI 兼容协议，含火山方舟 Ark）
+    "openai>=1.60",
     # 日志
     "structlog>=24.4",
     # 工具

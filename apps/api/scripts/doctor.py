@@ -189,6 +189,28 @@ try:
 except Exception as exc:  # noqa: BLE001
     line(WARN, "Redis 不可用", f"{str(exc)[:120]}（worker / 缓存会退化为不可用）")
 
+# ---------------------------------------------------------------- 3.5 模型
+print("\n模型")
+_key = settings.OPENAI_API_KEY
+if _key:
+    shown = f"{_key[:8]}***{_key[-4:]}" if len(_key) > 16 else "***"
+    line(OK, "OPENAI_API_KEY 已配置", shown)
+else:
+    line(WARN, "未配置 OPENAI_API_KEY", "向量化与 LLM 降级为规则版；填 apps/api/.env")
+line(
+    OK,
+    f"LLM_MODEL={settings.LLM_MODEL}",
+    "推理模型：token 多为 reasoning，成本与延迟高" if settings.LLM_IS_REASONING else "",
+)
+line(OK, f"EMBEDDING_MODEL={settings.EMBEDDING_MODEL}", f"dim={settings.EMBEDDING_DIM}")
+if settings.EMBEDDING_DIM > 2000:
+    line(
+        WARN,
+        f"{settings.EMBEDDING_DIM} 维 > pgvector 索引上限 2000",
+        "向量索引不会创建，语义检索退化为全表扫描；需索引时设 EMBEDDING_TRUNCATE_TO<=2000",
+    )
+line(OK, "真机连通性", "make models（doctor 不做真实调用，避免产生费用）")
+
 # ---------------------------------------------------------------- 结论
 print()
 if problems:

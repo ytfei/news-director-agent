@@ -30,6 +30,12 @@ from app.models.enums import ClusterStatus, ContentType, sa_enum
 DIM = settings.EMBEDDING_DIM
 NOT_DELETED = text("deleted_at IS NULL")
 
+# ★ pgvector 硬限制：HNSW / IVFFlat 索引最多 2000 维。
+#   doubao-embedding-vision 实测 2048 维 → 建不了索引，只能全表扫描。
+#   模型层必须与迁移层用同一判断，否则 alembic check 会一直检出差异（TODO P0-2）。
+VECTOR_INDEX_MAX_DIM = 2000
+CAN_VECTOR_INDEX = DIM <= VECTOR_INDEX_MAX_DIM
+
 
 class Tag(UUIDPkMixin, Base):
     __tablename__ = "tags"
@@ -53,11 +59,17 @@ class NewsCluster(UUIDPkMixin, TimestampMixin, Base):
     __tablename__ = "news_clusters"
     __table_args__ = (
         Index("ix_news_clusters_last_seen", "last_seen_at"),
-        Index(
-            "ix_news_clusters_centroid",
-            "centroid",
-            postgresql_using="hnsw",
-            postgresql_ops={"centroid": "vector_cosine_ops"},
+        *(
+            (
+                Index(
+                    "ix_news_clusters_centroid",
+                    "centroid",
+                    postgresql_using="hnsw",
+                    postgresql_ops={"centroid": "vector_cosine_ops"},
+                ),
+            )
+            if CAN_VECTOR_INDEX
+            else ()
         ),
     )
 
@@ -92,11 +104,17 @@ class NewsItem(UUIDPkMixin, TimestampMixin, SoftDeleteMixin, Base):
         Index("ix_news_items_entities", "entities", postgresql_using="gin"),
         # v1 中文检索靠 trgm + 向量；不建 tsv 索引（'simple' 对中文不分词，见 05 §4.8）
         Index("ix_news_items_title_trgm", "title", postgresql_using="gin", postgresql_ops={"title": "gin_trgm_ops"}),
-        Index(
-            "ix_news_items_embedding",
-            "embedding",
-            postgresql_using="hnsw",
-            postgresql_ops={"embedding": "vector_cosine_ops"},
+        *(
+            (
+                Index(
+                    "ix_news_items_embedding",
+                    "embedding",
+                    postgresql_using="hnsw",
+                    postgresql_ops={"embedding": "vector_cosine_ops"},
+                ),
+            )
+            if CAN_VECTOR_INDEX
+            else ()
         ),
         Index("ix_news_items_enrich", "enrich_status", postgresql_where=text("enrich_status <> 'done'")),
         Index("ix_news_items_simhash", "simhash"),
