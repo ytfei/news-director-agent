@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # 数据库
     DATABASE_URL: str = "postgresql+asyncpg://nda:nda@localhost:5433/nda"
     DATABASE_URL_SYNC: str = "postgresql+psycopg://nda:nda@localhost:5433/nda"
+    # ★ 独立测试库：集成测试默认写这里，避免污染开发库（TODO D13）。
+    #   用空库跑测试时先执行 make test-db-create
+    TEST_DATABASE_URL: str = "postgresql+asyncpg://nda:nda@localhost:5433/nda_test"
+    TEST_DATABASE_URL_SYNC: str = "postgresql+psycopg://nda:nda@localhost:5433/nda_test"
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20

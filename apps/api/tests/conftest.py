@@ -13,6 +13,23 @@
 
 from __future__ import annotations
 
+import os
+
+# ★ 必须在导入 app.* 之前切换：database.engine 是模块级单例，导入时就按 DATABASE_URL 建好了。
+#   环境变量优先级高于 .env，所以这样改是生效的。
+#   设 USE_TEST_DB=0 可强制走开发库（调试个别用例时用）。
+if os.getenv("USE_TEST_DB", "1") != "0":
+    os.environ.setdefault(
+        "DATABASE_URL",
+        os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://nda:nda@localhost:5433/nda_test"),
+    )
+    os.environ.setdefault(
+        "DATABASE_URL_SYNC",
+        os.getenv(
+            "TEST_DATABASE_URL_SYNC", "postgresql+psycopg://nda:nda@localhost:5433/nda_test"
+        ),
+    )
+
 import pytest
 from app.core.database import SessionLocal, engine
 from app.core.redis import close_redis

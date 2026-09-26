@@ -173,6 +173,30 @@ npm run build                        # tsc --noEmit + vite build 通过
 - [ ] 写作（pro 规划）同理，必须异步流式
 - [ ] `ENRICH_USE_LLM` 目前默认 false；turbo 分类仅 36 tok，M2 收尾时可评估打开
 
+### 1.7 验收环境与首次验收结果（2026-09-26）
+
+**一条命令验收**：`make acceptance`（脚本 `apps/api/scripts/acceptance.py`）
+
+设计取舍：**统计类指标只读开发库**（不写入），**功能链路在独立测试库 `nda_test` 跑**
+（复用集成测试），因此验收过程不会污染真实数据。不达标时退出码 1，可直接接 CI。
+
+| 验收项 | 实测 | 阈值 | 判定 |
+| --- | --- | --- | --- |
+| 业务表 / 迁移版本 / 预置数据 | 32 表 · head=0006 · 主题 15 · 提示词 4 | — | ✅ |
+| 同步 | 15982 条 · 最近一次 success | — | ✅ |
+| **重复率** | **3.07%**（50/1628） | < 2% | ❌ |
+| **多源簇占比** | **0.20%**（31/15861） | > 10% | ❌ |
+| 向量化覆盖 | 1 条（0.0%，存量待补跑 enrich） | > 0 | ⚠️ |
+| 功能链路（集成测试） | 67 passed / 0 failed / 0 skipped | 0 failed | ✅ |
+| 前端构建 | `tsc --noEmit` + `vite build` 通过 | 0 error | ✅ |
+
+**结论**：功能链路与前端可用；**两项质量指标不达标，且指向同一处**——
+规则版 simhash 的阈值与去重策略（TODO P0-1）。这两项不解决，"另有 N 家报道 /
+展开看各源差异"就是空功能，M1 的验收口径也无法闭环。
+
+> 验收脚本自身也修了一处取样 bug：重复率原本取"最近一次同步"，
+> 若该次为空同步会算出 `0/0` 的**假绿值**；现改为取最近一次 `fetched > 0` 的同步。
+
 ---
 
 ## 2. 本次交付暴露的问题
@@ -192,6 +216,11 @@ npm run build                        # tsc --noEmit + vite build 通过
 
 > D3 最危险：`pytest` 报"通过"，但 4 条集成测试其实一条都没跑。修掉后立刻暴露了 D2 与 D4。
 
+| # | 现象 | 根因 | 处置 |
+| --- | --- | --- | --- |
+| D16 | 新建的库跑 `alembic upgrade head` 在第一个 VECTOR 列失败（`type "vector" does not exist`） | 扩展只在 `infra/initdb/00-extensions.sql` 里对**默认库**执行一次，任何新建库都没有 → 全新环境部署 / CI 建临时库 / 新建测试库都会踩到 | `alembic/env.py` 的 `ensure_extensions()` 在所有迁移之前统一创建 + 迁移 `0006_ensure_extensions`（幂等兜底） |
+| D17 | 迁移日志全部 `Running upgrade ... 成功`，但库里 **0 张表** | 在 `context.begin_transaction()` **之前**用同一个连接执行 DDL，连接进入事务态，Alembic 认为事务由外部管理而不提交，连接关闭时整体回滚（**静默失败，最难查**） | `ensure_extensions` 改用**独立连接**并显式 `commit()`，迁移连接保持干净 |
+
 ### 2.2 待修（已定位，进入 M2 收尾）
 
 | # | 现象 | 影响 | 方向 |
@@ -201,7 +230,7 @@ npm run build                        # tsc --noEmit + vite build 通过
 | D10 | 前端用 `window.location.href` 跳转 | 绕过 react-router，丢失 SPA 状态 | 统一改 `useNavigate` |
 | D11 | 单批检查上限 20 / 并发 ≤5 只在文档 | 批量提交可能打满 LLM 造成成本尖峰 | 服务端 enforce + 返回 429/422 |
 | D12 | `/materials` 用 `limit/offset`，无游标 | 素材上量后翻页退化 | 改用 `before_date + offset` 复合游标 |
-| D13 | 集成测试写进开发库 | 开发库被测试数据污染 | 独立测试库 + `seed` / `reset` 脚本（CI 的前置条件） |
+| D13 | 集成测试写进开发库 | 开发库被测试数据污染 | ✅ **已解决（2026-09-26）**：独立测试库 `nda_test` + `make test-db-create` / `make test-db-reset`；conftest 在导入 app 前切换 `DATABASE_URL`（`USE_TEST_DB=0` 可强制走开发库）。实测：开发库 15982 → 15982 不变，测试数据落在 nda_test |
 | D15 | 镜像 EXPOSE 让 worker 在 `docker compose ps` 里显示 `8000/tcp` | 误导（worker 不监听端口） | 多角色共用镜像的固有代价，或在 compose 覆盖标注 |
 
 ---

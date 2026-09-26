@@ -62,12 +62,32 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+# ★ 扩展必须在**第一个**迁移之前就绪：0001 就用到 vector / pgcrypto / pg_trgm，
+#   而 initdb 只在容器首次初始化时对默认库执行一次，新建的库不会有。
+#   放在这里才能保证「任意空库 + alembic upgrade head」成立（全新部署 / CI / 测试库）。
+REQUIRED_EXTENSIONS = ("pgcrypto", "vector", "pg_trgm")
+
+
+def ensure_extensions(connectable) -> None:
+    """★ 必须用**独立的连接**并显式 commit。
+
+    如果复用迁移那个连接、且在 `context.begin_transaction()` 之前执行 DDL，
+    连接会先进入事务状态，Alembic 便认为"事务已由外部管理"而不做提交；
+    连接关闭时整个迁移被回滚 —— 表现为"upgrade 全部 Running 成功，但库里一张表都没有"。
+    """
+    with connectable.connect() as conn:
+        for ext in REQUIRED_EXTENSIONS:
+            conn.exec_driver_sql(f"CREATE EXTENSION IF NOT EXISTS {ext}")
+        conn.commit()
+
+
 def run_migrations_online() -> None:
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    ensure_extensions(connectable)
     with connectable.connect() as connection:
         context.configure(
             connection=connection, target_metadata=target_metadata, compare_type=True

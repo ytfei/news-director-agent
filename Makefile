@@ -111,6 +111,18 @@ test-unit: ## 仅不依赖数据库的单测
 test-integration: ## 仅集成测试（需要 Postgres 已迁移）
 	cd $(API_DIR) && uv run pytest tests/test_workspace_flow.py -q -rs
 
+.PHONY: test-db-create
+test-db-create: ## 创建并迁移独立测试库（验收 / CI 前置，避免污染开发库）
+	cd $(API_DIR) && uv run python scripts/init_test_db.py
+
+.PHONY: test-db-reset
+test-db-reset: ## 重置测试库（清空重建）
+	cd $(API_DIR) && uv run python scripts/init_test_db.py --reset
+
+.PHONY: acceptance
+acceptance: ## 功能验收：按 docs/01 验收指标逐项实测并输出报告
+	cd $(API_DIR) && uv run python scripts/acceptance.py
+
 .PHONY: test-web
 test-web: ## 前端类型检查 + 生产构建
 	cd $(WEB_DIR) && npm run build
