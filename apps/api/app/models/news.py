@@ -122,6 +122,10 @@ class NewsItem(UUIDPkMixin, TimestampMixin, SoftDeleteMixin, Base):
         ),
         Index("ix_news_items_enrich", "enrich_status", postgresql_where=text("enrich_status <> 'done'")),
         Index("ix_news_items_simhash", "simhash"),
+        # LSH 粗筛桶 + 时间（L3 转载判定去重）。
+        # ★ 0007 迁移已建此索引，但模型此前漏了定义 —— `alembic check` 会误判为
+        #   remove_index 而报漂移（CI 门槛）。补上定义后模型与库一致。
+        Index("ix_news_items_minhash_bucket", "minhash_bucket", "published_at"),
     )
 
     raw_document_id: Mapped[uuid.UUID | None] = mapped_column(
