@@ -240,7 +240,15 @@ class ModelProvider:
             async with sem:
                 try:
                     resp = await client.embeddings.create(
-                        model=settings.EMBEDDING_MODEL, input=batch
+                        model=settings.EMBEDDING_MODEL,
+                        input=batch,
+                        # ★ Matryoshka 降维（2026-09-28 定案）：模型原生 2048 维，
+                        #   但 pgvector 的 HNSW/IVFFlat 索引硬上限是 2000 维 —— 超了索引建不了，
+                        #   检索会退化成 O(n) 全表扫描。
+                        #   该模型支持 dimensions 参数，由模型端直接输出 1024 维
+                        #   （Matryoshka 表征：前 N 维本身就是有效的低维表示，不是简单截断）。
+                        #   比"取 2048 再本地截断"更干净：传输与存储都减半。
+                        dimensions=settings.EMBEDDING_DIM,
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.error("llm.embed_failed", error=str(exc)[:300])
@@ -255,15 +263,17 @@ class ModelProvider:
         return vecs[0] if vecs else []
 
     def _fit(self, vec: list[float]) -> list[float]:
-        """对齐到实际存储维度（截断或补零）。
+        """对齐到实际存储维度（截断或补零）。**兜底，正常路径不会触发**。
 
-        ★ pgvector 索引上限 2000 维，而 doubao-embedding-vision 是 2048 维。
-        配置 EMBEDDING_TRUNCATE_TO 后对所有向量统一截断，余弦相似度仍可用（精度下降）。
+        正常情况下 `dimensions` 参数已让模型返回 EMBEDDING_DIM 维，这里直接返回。
+        仅在供应商忽略 dimensions 参数、或换用不支持降维的模型时才需要截断/补零，
+        此时 EMBEDDING_TRUNCATE_TO 可进一步指定一个比 EMBEDDING_DIM 更小的目标维度。
         """
         target = self.embedding_dim
         if len(vec) == target:
             return vec
         if len(vec) > target:
+            log.warning("llm.embed_dim_mismatch", actual=len(vec), target=target)
             return vec[:target]
         return vec + [0.0] * (target - len(vec))
 

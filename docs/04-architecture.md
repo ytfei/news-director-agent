@@ -89,7 +89,7 @@ flowchart TB
 | Agent 编排 | **LangGraph 1.x** | 唯一能同时表达**循环 + 并行 + 中断/恢复 + 持久化状态**的成熟方案；HITL 是一等公民 | 自研状态机（不必要，成本更高） |
 | Agent 封装 | **deepagents** | 直接给到 planning / subagent / 虚拟 FS / skills 四个能力，避免重复造轮子 | 手写 middleware（当 deepagents 不满足时局部替换） |
 | **LLM 档位** | **pro** `doubao-seed-2.1-pro`（1M，旗舰深度推理）／ **turbo** `doubao-seed-2.1-turbo`（256k，均衡主力，**默认档**）／ **lite** `doubao-seed-2.1-lite`（256k，轻量批量） | 三款**实测均为推理模型**（reasoning 占 97~100%）。同一分类任务：pro 194tok/6.5s、**turbo 36tok/2.1s**、lite 407tok/8.9s → **turbo 是甜点**；**lite 在简单任务上并不比 turbo 省**（"轻量"是能力定位，不是思考更少） | 私有化换自建 vLLM / Ollama 的 OpenAI 兼容端点（协议不变，零代码改动） |
-| **Embedding** | `doubao-embedding-vision`（实测 2048 维） | 已定案；2048 > pgvector 索引上限 2000，暂走全表扫描 | 换模型需同步 `EMBEDDING_DIM` 并重建向量列 |
+| **Embedding** | `doubao-embedding-vision`，**调用时传 `dimensions=1024`**（模型原生 2048 维） | ★ 2048 > pgvector 索引上限 2000 → 索引建不了、检索退化成 O(n) 全表扫描。该模型支持 Matryoshka 降维，传参即输出 1024 维（前 N 维本身即有效低维表示，非简单截断），**路径与 model id 均不变**。降维后 HNSW 索引正常建立（迁移 0008），检索 O(log n) | 换模型需同步 `EMBEDDING_DIM` 并重建向量列；私有化换本地 BGE-M3 |
 | 网页检索 | Tavily / 博查（国内） | **ResearcherAgent 必备**，tushare 覆盖不到海外与自由文本源 | 自建爬虫（量起来后） |
 | 校验 | **Pydantic v2** | API schema 与 `with_structured_output` 复用同一套模型 | — |
 | ORM | **SQLAlchemy 2.0 async** | 类型友好、支持 async、生态成熟 | SQLModel（会牺牲灵活性） |
@@ -1078,7 +1078,7 @@ v1 的 SaaS 架构必须能闭网运行，因此以下组件**必须可替换**�
 | 组件 | SaaS | 私有化 | 抽象方式 |
 | --- | --- | --- | --- |
 | LLM | 火山方舟 Ark（OpenAI 兼容）· `doubao-seed-evolving` | 自建 vLLM / Ollama 的 OpenAI 兼容端点 | ✅ `ModelProvider` 已落地（`app/services/model_provider.py`），只改 `OPENAI_BASE_URL` |
-| Embedding | `doubao-embedding-vision`（实测 2048 维） | 本地 BGE-M3 | ✅ 同上，只改 `EMBEDDING_MODEL` / `EMBEDDING_DIM` |
+| Embedding | `doubao-embedding-vision`（传 `dimensions=1024` 降维） | 本地 BGE-M3（1024 维，且**数据不出域**） | ✅ 同上，只改 `EMBEDDING_MODEL` / `EMBEDDING_DIM` |
 | 可观测 | LangSmith | **Langfuse 自托管** | `Tracer` 协议；`agent_runs.trace_url` 存各自链接 |
 | 对象存储 | 云 OSS | MinIO（已在 compose 中） | S3 兼容接口，天然一致 |
 | 凭据加密 | KMS | 本地 Fernet（密钥由部署方注入） | `SecretsProvider` 协议 |

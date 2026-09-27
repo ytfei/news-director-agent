@@ -18,7 +18,7 @@
 | 分区 | `raw_documents` / `news_items` 数据量最大，预留按 `published_at` 月分区的能力（v1 可先不分区） |
 | 索引原则 | 所有外键建索引；列表查询按 `(过滤列, 排序列 DESC)` 建复合索引；避免过度索引写入热点表 |
 | 软删唯一性 | **禁止**把 `deleted_at` 写进 `UNIQUE`（软删两次即失效，且 PG 中 NULL 互不相等会连平台级行一起失去约束）；一律用 `WHERE deleted_at IS NULL` 的部分唯一索引 |
-| 向量维度 | 全文 `vector(1024)` 由 `EMBEDDING_DIM` 配置决定（Spike 先定模型再定维度）；换维度需**重建 HNSW 索引**，见 §4.8 |
+| 向量维度 | `vector(1024)`，由 `EMBEDDING_DIM` 配置决定。**已定案（2026-09-28）**：模型原生 2048 维，经 Matryoshka 降维为 1024（pgvector 索引上限 2000）。换维度需**新迁移改列类型 + 重建 HNSW + 全量重算存量**，见 §4.8 与迁移 0008 |
 
 ### 1.1 Alembic 配置要点
 
@@ -1227,16 +1227,20 @@ ORDER BY hamming LIMIT 20;
 ### 4.8 向量维度与 canonical JSON
 
 ```python
-# 维度已定案（Spike #4 完成，2026-09-24 真机实测）
-EMBEDDING_DIM = 2048          # doubao-embedding-vision（火山方舟 Ark，OpenAI 兼容协议）
-# 变更维度 = 重建向量列与索引：news_items / news_clusters / opinions / user_style_profiles
+# 维度已定案（2026-09-28 最终定案，真机验证返回 1024 维）
+EMBEDDING_DIM = 1024          # doubao-embedding-vision（火山方舟 Ark，OpenAI 兼容协议）
+#   ★ 模型原生 2048 维，但支持 **Matryoshka 降维**：调用时多传一个 dimensions=1024，
+#     由模型端直接输出 1024 维（前 N 维本身即有效的低维表示，**不是简单截断**）。
+#     路径与 model id 均不变 —— 见 app/services/model_provider.py::embed。
+#   变更维度 = 新迁移改列类型 + 重建 HNSW + 全量重算（迁移 0008 即为此例，
+#     覆盖 news_items.embedding / news_clusters.centroid）
 
 # ★ 硬限制（真机验证，2026-09-18）：pgvector 的 HNSW / IVFFlat 索引最多 2000 维。
 #   EMBEDDING_DIM > 2000 时建索引会直接报
 #   "column cannot have more than 2000 dimensions for hnsw index"。
-#   处理：迁移中条件化创建（见 alembic/versions/c6fca63ba48f），超限时走全表扫描，
-#   或先把 embedding 降到 <= 2000 维（Matryoshka / PCA）再入库。
-VECTOR_INDEX_MAX_DIM = 2000
+#   已采用的解法：Matryoshka 降维到 1024 → 索引正常建立（迁移 0008）。
+#   三重收益：存储减半（8KB→4KB/条）、距离计算减半、检索从 O(n) 变 O(log n)。
+VECTOR_INDEX_MAX_DIM = 2000   # 硬上限；1024 远低于它，留有余量
 
 # canonical JSON：jsonb 序列化顺序不确定，必须先规范化再 hash，否则 ODS 幂等失效
 def canonical_json(payload: dict) -> str:

@@ -104,8 +104,14 @@ class Settings(BaseSettings):
     # 单批检查并发上限（其余排队），避免同时打满 LLM
     REVIEW_MAX_CONCURRENCY: int = 5
 
-    # 向量维度：doubao-embedding-vision 实测 2048（已定案），换维度需重建向量列
-    EMBEDDING_DIM: int = 2048
+    # 写入 PG 的目标维度。★ 必须 ≤ 2000：pgvector 的 HNSW/IVFFlat 索引硬上限，
+    # 超过则索引无法创建，语义检索退化为 O(n) 全表扫描。
+    # doubao-embedding-vision 原生 2048 维，但支持 Matryoshka 降维 ——
+    # 调用时传 dimensions=1024 由模型端直接输出 1024 维（前 1024 维本身即有效的
+    # 低维表示，非简单截断）。1024 维在检索场景精度损失通常 <2%，换来：
+    # 存储减半（8KB→4KB/条）、距离计算减半、且索引终于能建。
+    # ★ 改这个值必须配套：新迁移（改 vector 列类型 + 重建 HNSW）+ 全量重算存量向量。
+    EMBEDDING_DIM: int = 1024
 
     @property
     def is_dev(self) -> bool:

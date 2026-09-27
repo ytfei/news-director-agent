@@ -126,7 +126,8 @@ cd apps/api
 uv run alembic upgrade head          # 0001 → 0004
 uv run pytest tests/ -q              # 18 passed
 uv run ruff check app                # All checks passed
-uv run alembic check                 # 仅剩已知的 pgvector 索引差异（P0-2）
+uv run alembic check                 # ✅ 无差异（P0-2 已解决：降维 1024 + HNSW 已建；
+                                     #    另修复 minhash 索引模型定义缺失导致的误报漂移）
 
 cd ../web
 npm run build                        # tsc --noEmit + vite build 通过
@@ -333,38 +334,35 @@ uv run python scripts/compare_sources.py --srcs sina,eastmoney --hours 24
 - [ ] 标定后上调验收线（现 1.5%，是可达标线而非理想线）
 - [ ] 长期：由 `ScoutAgent` 做模型判定，表结构不变
 
-### 2. pgvector 索引维度超限 —— 维度已定案，CI 门槛已解除（2026-09-24）
+### 2. ✅ pgvector 索引维度超限 —— 已彻底解决：Matryoshka 降维 1024 + HNSW 索引已建（2026-09-28）
 
-**已解决**：
+**最终方案：模型不用换，只需调用时多传一个 `dimensions=1024` 参数。**
 
-- [x] 真机实测 `doubao-embedding-vision` = **2048 维**，三处值统一为 2048
-      （库 `vector(2048)` / `apps/api/.env` / compose 默认值 —— 原先 `.env` 写 1024 且被环境变量静默覆盖）
-- [x] 模型层与迁移层用**同一判断**（`CAN_VECTOR_INDEX = DIM <= 2000`），
-      因此 `alembic check` **不再检出差异**（`No new upgrade operations detected`）
-- [x] `enrich` 真实写入 embedding 已验证：库中 `vector_dims = 2048`
-- [x] 文档已更新（`docs/04` 选型表、`docs/05` §4.8）
+- [x] `doubao-embedding-vision` 原生 2048 维，但**支持 Matryoshka 降维** ——
+      传 `dimensions=1024` 由模型端直接输出 1024 维（前 N 维本身即有效的低维表示，**不是简单截断**）
+- [x] 代码改动：`app/services/model_provider.py::embed` 增加 `dimensions=settings.EMBEDDING_DIM`
+      —— **路径与 model id 均不变**
+- [x] 配置：`EMBEDDING_DIM` 2048 → **1024**（`config.py` / `.env` / `.env.example` 三处统一）
+- [x] 迁移 `0008_embedding_dim_1024`：清空存量向量 → `vector(2048)` → `vector(1024)` → **建 HNSW 索引**
+      （幂等：全新环境从 0001 起跑时列已是 1024，本迁移全部跳过）
+- [x] 真机验证：`embed_one()` 返回 **1024 维**，与 `EMBEDDING_DIM` 一致
+- [x] 库中 `news_items.embedding` / `news_clusters.centroid` 均为 `vector(1024)`；
+      `ix_news_items_embedding` / `ix_news_clusters_centroid` **（hnsw）均已建立**
+- [x] 回归：`pytest` **96 passed**；`ruff check app scripts` **All checks passed**
+- [x] 文档已同步（`docs/README` 技术栈、`docs/04` 选型表与私有化表、`docs/05` §1 与 §4.8、`docs/07` D1/H7）
 
-**剩余（不再是阻塞，但影响检索性能）**：
+**三重收益**：存储减半（8KB→4KB/条）、距离计算减半、**检索从 O(n) 全表扫描变为 O(log n)**。
 
-- [ ] 2048 维 > 2000 → **向量索引建不了**，语义检索退化为全表扫描
-      （当前 1.5k 条可接受；上万条后必须解决）
-- [ ] 方案三选一：① 设 `EMBEDDING_TRUNCATE_TO<=2000`（统一截断，精度下降，可建索引）
-      ② 换 ≤2000 维的 embedding 模型 ③ 接受全表扫描直到数据量成为瓶颈
-- [ ] `make doctor` 目前仍会 WARN「向量索引缺失」—— 这是**预期行为**，不是故障
+**历史背景（保留，避免重犯）**：
 
-**现象（保留说明）**：HNSW / IVFFlat 上限 2000 维，超限建索引直接报错。
-迁移与模型层都做了条件化跳过。
-  | 位置 | 值 |
-  | --- | --- |
-  | 数据库 `news_items.embedding` | `vector(2048)` |
-  | Shell 导出的环境变量 / compose 默认值 | `2048` |
-  | `apps/api/.env` 文件 | `1024`（**被环境变量静默覆盖**） |
-  → 一旦换环境（比如在没导出该变量的机器上跑），同一份代码就会用 1024 维去写 2048 维的列，直接报错。
-- **现状**：`alembic check` 会反复检出 `ix_news_clusters_centroid` / `ix_news_items_embedding` 差异 —— **这是当前 CI 的门槛问题**。
-- [ ] 定案向量方案（换 ≤2000 维模型 / Matryoshka 降维 / 维持全表扫描）
-- [ ] 把三处值统一，并删掉 `apps/api/.env` 里被覆盖的那一行（或改用环境变量注入）
-- [ ] 固定后更新文档（`docs/05` 仍写 1024）
-- **验收**：`make doctor` 无 WARN，`alembic check` 无差异，语义检索走索引
+- 曾三处值不一致：库 `vector(2048)` / compose 环境变量 `2048` / `.env` 文件 `1024`（被静默覆盖）
+  → 换台机器跑就会用 1024 维去写 2048 维的列并报错。现已全部统一为 **1024**。
+- `docs/05` 早期写「`vector(1024)`」只是预期值，与当时实际的 2048 不符；现在名实相符。
+
+**遗留（不再阻塞，归入 P1-9 同步指标）**：
+
+- [ ] **存量向量补跑**：降维后存量已清空，当前覆盖 **0.0%**，需跑一次全量 `enrich`
+- [ ] 补跑后验证 `make acceptance` 的「向量化覆盖」指标从 0.0% 上去
 
 ### 3. tushare 快讯「返回 0 行」 —— 已于 2026-09-20 定位并修复
 

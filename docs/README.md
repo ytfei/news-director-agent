@@ -42,7 +42,7 @@
 | 主库 | **PostgreSQL 16** + **pgvector** + **pg_trgm** | 关系 + 向量 + 中文模糊检索一个库搞定，v1 不引入 ES |
 | 缓存 / 队列 | **Redis 7** + **arq**（异步任务队列） | arq 是 async 原生，比 Celery 更贴合；若团队熟悉 Celery 可换 |
 | 对象存储 | S3 兼容（MinIO 本地 / 云 OSS） | 公告 PDF、导出文章、封面图 |
-| **LLM 档位** | **火山方舟 Ark**（OpenAI 兼容协议）：`pro` 深度推理 / `turbo` 均衡主力（默认）/ `lite` 轻量批量；向量 `doubao-embedding-vision`（2048 维） | 三款实测均为推理模型；turbo 在简单任务上最省（36tok/2.1s）。按场景路由见 `04-architecture.md` §5.6 |
+| **LLM 档位** | **火山方舟 Ark**（OpenAI 兼容协议）：`pro` 深度推理 / `turbo` 均衡主力（默认）/ `lite` 轻量批量；向量 `doubao-embedding-vision`（原生 2048 维，**降维 1024 入库**） | 三款实测均为推理模型；turbo 在简单任务上最省（36tok/2.1s）。按场景路由见 `04-architecture.md` §5.6 |
 | 网页检索 | Tavily / 博查 | ResearcherAgent 的 `web_probe` 依赖它；没有它，事实核查被锁死在 tushare 内 |
 | 可观测 | **LangSmith** + structlog（私有化换 **Langfuse 自托管**） | LangGraph 原生 trace，按 `run_id` 关联业务记录 |
 | 前端 | **React 19 + Vite + TypeScript（SPA）** | **不用 Astro 做主体**，理由见 `04-architecture.md` §8 |
