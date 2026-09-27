@@ -104,6 +104,38 @@ class Settings(BaseSettings):
     # 单批检查并发上限（其余排队），避免同时打满 LLM
     REVIEW_MAX_CONCURRENCY: int = 5
 
+    # ---- 检查引擎（B1：规则保底 + 模型增强）----
+    # rules = 纯规则（零延迟零成本）；llm = 纯模型；hybrid = 两者合并（默认）
+    # ★ 默认 hybrid 而不是 llm：实测核查类任务单次 48~108s，且规则版是高精度零成本，
+    #   用模型"替换"规则既慢又可能引入误报；规则保底 + 模型补语义层才是正解。
+    REVIEW_MODE: str = "hybrid"
+    # ★ 改 prompt 必须递增此版本号，否则报告缓存永远命中旧结论
+    REVIEW_PROMPT_VERSION: str = "2026-09-28.v1"
+    # 三轨置信度阈值（docs/01 §4.2 C：统一阈值下「事实误报<15%」与「合规召回>95%」互斥）
+    REVIEW_CONFIDENCE_FACT: float = 0.70        # 高精度：宁可漏报，误报直接伤信任
+    REVIEW_CONFIDENCE_COMPLIANCE: float = 0.35  # 高召回：宁可误报，漏报是法律风险
+    REVIEW_CONFIDENCE_LOGIC: float = 0.55       # 折中
+    # 成本控制：单 run 的 token 预算，超了就停止调用后续条目并标记 budget_exceeded
+    REVIEW_TOKEN_BUDGET: int = 200_000
+    REVIEW_MAX_ITEMS_PER_RUN: int = 20
+    # 成本费率（USD / 1K tokens）。★ 默认 0 = 只记 token 不计费 ——
+    # 单价应由 Spike #7 实测后按供应商账单填写，这里不猜。
+    # 填了之后 usage_records.cost_usd 才有意义，硬配额也才能按金额判定。
+    LLM_COST_PER_1K_INPUT: float = 0.0
+    LLM_COST_PER_1K_OUTPUT: float = 0.0
+
+    # ---- 网页检索（B0-2：fact 轨补查，tushare 覆盖不到的海外与自由文本源）----
+    WEB_SEARCH_PROVIDER: str = ""          # tavily / bocha；空 = 禁用（自动降级）
+    WEB_SEARCH_API_KEY: str = ""
+    WEB_SEARCH_BASE_URL: str = "https://api.tavily.com"
+    WEB_SEARCH_TIMEOUT: int = 20
+    WEB_SEARCH_TOP_K: int = 5
+
+    # ---- 事实基线（B2）----
+    # ingest 阶段异步预生成（review 时只读缓存，这是「检查 < 8s」的前提）
+    FACT_CARD_AUTO_GENERATE: bool = True
+    FACT_CARD_MAX_CLAIMS: int = 12
+
     # 写入 PG 的目标维度。★ 必须 ≤ 2000：pgvector 的 HNSW/IVFFlat 索引硬上限，
     # 超过则索引无法创建，语义检索退化为 O(n) 全表扫描。
     # doubao-embedding-vision 原生 2048 维，但支持 Matryoshka 降维 ——

@@ -49,6 +49,10 @@ doctor: ## 环境自检：配置 / DB / Redis / 迁移版本 / 向量维度 / �
 models: ## 模型连通性真机自检（embedding 维度 + 对话 + reasoning token 占比）
 	cd $(API_DIR) && uv run python scripts/model_smoke.py
 
+.PHONY: review-smoke
+review-smoke: ## 检查引擎真机自检：事实基线 → 规则版 → 模型版 → 合并增量（会花 token）
+	cd $(API_DIR) && uv run python scripts/review_smoke.py
+
 # ---------------------------------------------------------------- 本地开发
 
 ##@ 本地开发（依赖走 Docker，代码本地跑）

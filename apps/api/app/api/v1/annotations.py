@@ -32,6 +32,9 @@ class AnnotationIn(BaseModel):
 
 class CheckIn(BaseModel):
     material_ids: list[uuid.UUID] = Field(default_factory=list)
+    # ★ 同步入口默认 rules（毫秒级）。模型版单条 48~108 秒，
+    #   需要深度检查请走异步接口 POST /reviews/runs（返回 202 + run_id 轮询）。
+    mode: str | None = None
 
 
 @router.get("/materials/{material_id}/annotation")
@@ -108,10 +111,10 @@ async def check_annotations(
     session: AsyncSession = Depends(get_session),
     user_id: uuid.UUID = Depends(current_user_id),
 ) -> dict:
-    """提交检查。
+    """提交检查（同步）。
 
-    M2 规则版同步执行（毫秒级）；接 ReviewerAgent 后改为 arq + SSE，
-    但返回结构（run_id + reports）保持不变。
+    ★ 默认 rules（毫秒级即时反馈）；模型深度检查请走 `POST /reviews/runs`（异步）。
+    这不是偷懒 —— 实测核查类任务单条 48~108 秒，同步等在请求里用户会以为服务挂了。
     """
     await ensure_user(session, user_id)
     if not payload.material_ids:
@@ -134,7 +137,13 @@ async def check_annotations(
             status_code=422, detail="这些素材还没有点评，先在资讯中心或工作台写一条"
         )
 
-    result = await run_review(session, user_id, [(m, a) for m, a in rows])
+    result = await run_review(
+        session,
+        user_id,
+        [(m, a) for m, a in rows],
+        # 同步路径默认规则版，保证毫秒级返回
+        mode=payload.mode or "rules",
+    )
     reports = result["reports"]
     return {
         "run_id": result["run_id"],

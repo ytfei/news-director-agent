@@ -6,7 +6,14 @@ from arq import cron
 from arq.connections import RedisSettings
 
 from app.core.config import settings
-from app.workers.tasks import enrich_news_item, sync_connector, sync_due
+from app.workers.tasks import (
+    enrich_news_item,
+    generate_due_fact_cards,
+    generate_fact_card,
+    review_annotations,
+    sync_connector,
+    sync_due,
+)
 
 
 class WorkerSettings:
@@ -20,11 +27,21 @@ class WorkerSettings:
     poll_delay = 0.5
     health_check_interval = 30
 
-    functions = [sync_connector, sync_due, enrich_news_item]
+    functions = [
+        sync_connector,
+        sync_due,
+        enrich_news_item,
+        generate_fact_card,
+        generate_due_fact_cards,
+        review_annotations,
+    ]
 
     cron_jobs = [
         # 交易日每 30 分钟（非交易日降频由 connector 状态控制）
         cron(sync_due, minute={0, 30}, run_at_startup=False),
+        # 事实基线补生成：每小时限量 10 条。★ 限量是刻意的 ——
+        # 全量预生成意味着上万次 LLM 调用，成本会吃掉收入，只为被用到的资讯生成。
+        cron(generate_due_fact_cards, minute={15}, run_at_startup=False),
     ]
 
 

@@ -19,7 +19,8 @@ from datetime import datetime
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.agent import AgentRun
+from app.core.config import settings
+from app.models.agent import AgentRun, UsageRecord
 from app.models.enums import (
     AnnotationStatus,
     FindingSeverity,
@@ -30,8 +31,11 @@ from app.models.enums import (
     RunStatus,
 )
 from app.models.material import Annotation, Material
+from app.models.news import NewsItem
 from app.models.review import FactCardClaim, ReviewFinding, ReviewReport
 from app.repositories.review_repo import ReviewRepository, verdict_of
+from app.services.model_provider import Task, get_model_provider
+from app.services.review_llm import PROMPT_VERSION, llm_review
 
 log = structlog.get_logger()
 
@@ -65,6 +69,10 @@ class FindingDraft:
     quote: str | None = None
     suggestion: str | None = None
     evidence: list | None = None
+    # ★ 模型版才有；规则版留 None。用于按轨道调阈值与事后归因
+    confidence: float | None = None
+    rule_code: str | None = None
+    claim_id: uuid.UUID | None = None
 
     def to_model(self, body: str) -> ReviewFinding:
         start, end = _span(body, self.quote)
@@ -80,6 +88,9 @@ class FindingDraft:
             message=self.message,
             suggestion=self.suggestion,
             evidence=self.evidence or [],
+            confidence=self.confidence,
+            rule_code=self.rule_code,
+            claim_id=self.claim_id,
         )
 
 
@@ -217,89 +228,363 @@ def summarize(verdict: ReportVerdict, findings: list[ReviewFinding]) -> str:
 
 # ---------------- 编排 ----------------
 
+SEVERITY_RANK = {"blocker": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def cost_of(token_in: int, token_out: int) -> float:
+    """按配置费率折算成本。
+
+    ★ 费率默认 0（不猜单价）。Spike #7 实测后按供应商账单填
+    `LLM_COST_PER_1K_*`，这里才会产出真实金额。
+    """
+    return (
+        token_in / 1000 * settings.LLM_COST_PER_1K_INPUT
+        + token_out / 1000 * settings.LLM_COST_PER_1K_OUTPUT
+    )
+
+
+def _from_llm(findings: list, claims: list, body: str) -> list[FindingDraft]:
+    """模型 finding → FindingDraft，并把 claim_seq 映射成 claim_id。"""
+    out: list[FindingDraft] = []
+    for f in findings:
+        claim_id = None
+        # claim_seq 是模型看到的 1-based 序号，回指事实基线的具体断言
+        if 0 < f.claim_seq <= len(claims):
+            claim_id = claims[f.claim_seq - 1].id
+        out.append(
+            FindingDraft(
+                track=f.track,
+                severity=f.severity,
+                message=f.message,
+                quote=f.quote,
+                suggestion=f.suggestion,
+                evidence=f.evidence or None,
+                confidence=f.confidence,
+                rule_code=f.rule_code,
+                claim_id=claim_id,
+            )
+        )
+    return out
+
+
+def _not_dismissed(
+    drafts: list[FindingDraft], dismissed: set[tuple[str, str]]
+) -> list[FindingDraft]:
+    """历史驳回过滤：「这不算问题」的同一问题不再重复报。"""
+    return [d for d in drafts if (d.track.value, d.quote or "") not in dismissed]
+
+
+def _merge(*groups: list[FindingDraft]) -> list[FindingDraft]:
+    """合并规则版与模型版：按 (track, quote) 去重，严重者优先，再封顶避免噪音。
+
+    ★ 为什么要处理子串包含：两版的 quote 粒度天然不一致 ——
+      规则版命中词「必然」，模型版引用整句「业绩必然大涨」。
+      只做精确匹配的话，同一问题会并排列成两条，用户看到的是重复噪音。
+    """
+    dedup: dict[tuple[str, str], FindingDraft] = {}
+
+    def _same_key(new: FindingDraft) -> tuple[str, str] | None:
+        q_new = new.quote or ""
+        for key, old in dedup.items():
+            if key[0] != new.track.value:
+                continue
+            q_old = old.quote or ""
+            if q_new and q_old and (q_new in q_old or q_old in q_new):
+                return key
+            # 都没有 quote 时退回 message 前缀比较
+            if not q_new and not q_old and key[1] == new.message[:20]:
+                return key
+        return None
+
+    for group in groups:
+        for f in group:
+            same = _same_key(f)
+            if same is None:
+                dedup[(f.track.value, f.quote or f.message[:20])] = f
+            elif SEVERITY_RANK[f.severity.value] < SEVERITY_RANK[dedup[same].severity.value]:
+                dedup[same] = f
+
+    return sorted(dedup.values(), key=lambda f: SEVERITY_RANK[f.severity.value])[:20]
+
 
 async def run_review(
     session: AsyncSession,
     user_id: uuid.UUID,
     pairs: list[tuple[Material, Annotation]],
+    *,
+    mode: str | None = None,
+    use_cache: bool = True,
+    run: AgentRun | None = None,
 ) -> dict:
     """对一批（素材, 点评）执行三轨检查并落库。
 
-    同步执行：M2 的规则版足够快；接 ReviewerAgent 后改为 arq 任务 + SSE 推送，
-    API 形状（返回 run_id 与 reports）保持不变。
+    run：外部已建好的 AgentRun（异步入口用，便于前端立刻拿到 run_id 轮询）；
+         为 None 时内部新建。
+
+    mode：
+      rules  —— 纯规则（零延迟零成本，M2 现状）
+      llm    —— 纯模型
+      hybrid —— 规则保底 + 模型增强（**默认**）
+
+    同步执行；异步入口见 `workers.tasks.review_annotations`（返回 202 + run_id）。
     """
+    mode = (mode or settings.REVIEW_MODE).strip().lower()
+    if mode not in {"rules", "llm", "hybrid"}:
+        mode = "hybrid"
+
+    provider = get_model_provider()
+    use_llm = mode in {"llm", "hybrid"} and provider.enabled
+
     repo = ReviewRepository(session)
-    run = AgentRun(
-        user_id=user_id,
-        graph=RunGraph.review,
-        status=RunStatus.running,
-        thread_id=str(uuid.uuid4()),
-        input={"material_ids": [str(m.id) for m, _ in pairs]},
-        model="rules-v1",
-    )
-    session.add(run)
-    await session.flush()
+    if run is None:
+        # 异步入口会先建好 run（queued）再交给 worker，这样前端能立刻拿到 run_id 轮询
+        run = AgentRun(
+            user_id=user_id,
+            graph=RunGraph.review,
+            status=RunStatus.running,
+            thread_id=str(uuid.uuid4()),
+            input={
+                "material_ids": [str(m.id) for m, _ in pairs],
+                "mode": mode,
+                "prompt_version": PROMPT_VERSION,
+            },
+            model=f"{mode}:{PROMPT_VERSION}",
+        )
+        session.add(run)
+        await session.flush()
+    else:
+        run.input = {
+            "material_ids": [str(m.id) for m, _ in pairs],
+            "mode": mode,
+            "prompt_version": PROMPT_VERSION,
+        }
+        run.model = f"{mode}:{PROMPT_VERSION}"
+    run.status = RunStatus.running
     run.started_at = datetime.now()
 
     reports: list[ReviewReport] = []
     skipped: list[uuid.UUID] = []
+    cache_hits = 0
+    budget_exceeded = False
+    llm_errors: list[str] = []
+    total_in = total_out = 0
 
     for material, annotation in pairs:
-        if not (annotation.body or "").strip():
+        body = annotation.body or ""
+        if not body.strip():
             skipped.append(material.id)
             continue
+
         card = await repo.get_card(material.news_item_id)
         claims = await repo.claims_of(card.id) if card else []
 
-        # 历史驳回：「已确认不是问题」的同一问题不再重复报
+        # ★ 报告缓存：同一「点评版本 + 提示词版本 + 模式」直接复用。
+        #   没有它，用户每点一次检查都要重跑一遍 LLM（钱和时间的双重浪费）。
+        if use_cache:
+            cached = await repo.latest_report_of(annotation.id)
+            if (
+                cached is not None
+                and cached.annotation_version_no == annotation.current_version_no
+                and cached.prompt_version == PROMPT_VERSION
+                and cached.mode == mode
+            ):
+                reports.append(cached)
+                cache_hits += 1
+                continue
+
         dismissed = await repo.dismissed_signatures(annotation.id)
-        drafts = [
-            d
-            for d in _rules_for(annotation.body, claims)
-            if (d.track.value, d.quote or "") not in dismissed
-        ]
+        groups: list[list[FindingDraft]] = []
+
+        if mode != "llm":
+            groups.append(_not_dismissed(_rules_for(body, claims), dismissed))
+
+        if use_llm and not budget_exceeded:
+            news = await session.get(NewsItem, material.news_item_id)
+            findings, usage, err = await llm_review(
+                body=body,
+                title=news.title if news else "",
+                claims=claims,
+            )
+            total_in += usage.input
+            total_out += usage.output
+            if err:
+                llm_errors.append(err)
+            if total_in + total_out > settings.REVIEW_TOKEN_BUDGET:
+                # ★ 超预算后退回规则版，而不是让账单失控
+                budget_exceeded = True
+                log.warning("review.budget_exceeded", tokens=total_in + total_out)
+            groups.append(_not_dismissed(_from_llm(findings, claims, body), dismissed))
+
+        drafts = _merge(*groups) if groups else []
+
         report = await repo.create_report(
             user_id=user_id,
             annotation_id=annotation.id,
             annotation_version_no=annotation.current_version_no,
             run_id=run.id,
         )
-        await repo.add_findings(report, [d.to_model(annotation.body) for d in drafts])
+        report.mode = mode
+        report.prompt_version = PROMPT_VERSION
+        report.model = (
+            provider.model_for(provider.tier_for(Task.REVIEW)) if use_llm else "rules-v1"
+        )
+
+        await repo.add_findings(report, [d.to_model(body) for d in drafts])
         findings = await repo.findings_of(report.id)
         report.summary = summarize(report.verdict, findings)
 
         # ★ blocker 未处置 → annotation=blocked，禁止进入写作
-        status = {
+        annotation.status = {
             ReportVerdict.passed: AnnotationStatus.passed,
             ReportVerdict.needs_revision: AnnotationStatus.needs_revision,
             ReportVerdict.blocked: AnnotationStatus.blocked,
         }[report.verdict]
-        annotation.status = status
         annotation.last_checked_at = datetime.now()
         reports.append(report)
 
     run.status = RunStatus.succeeded
     run.finished_at = datetime.now()
+    run.token_input = total_in
+    run.token_output = total_out
     run.output = {
         "reports": len(reports),
+        "cache_hits": cache_hits,
         "skipped": [str(x) for x in skipped],
+        "budget_exceeded": budget_exceeded,
+        "llm_errors": llm_errors[:3],
         "verdicts": {
             v.value: sum(1 for r in reports if r.verdict == v) for v in ReportVerdict
         },
     }
+
+    # 成本台账：★ M1 就要有，是硬配额与定价的基础（docs/01 §6）
+    if total_in or total_out:
+        session.add(
+            UsageRecord(
+                user_id=user_id,
+                run_id=run.id,
+                category="review",
+                model=run.model,
+                token_input=total_in,
+                token_output=total_out,
+                cost_usd=cost_of(total_in, total_out),
+            )
+        )
+
     await session.commit()
 
-    log.info("review.finished", run_id=str(run.id), reports=len(reports), skipped=len(skipped))
+    log.info(
+        "review.finished",
+        run_id=str(run.id),
+        mode=mode,
+        reports=len(reports),
+        cache_hits=cache_hits,
+        skipped=len(skipped),
+        token_total=total_in + total_out,
+        budget_exceeded=budget_exceeded,
+    )
     return {
         "run_id": run.id,
         "reports": reports,
         "skipped_material_ids": skipped,
+        "mode": mode,
+        "cache_hits": cache_hits,
+        "budget_exceeded": budget_exceeded,
+        "token_total": total_in + total_out,
+        "llm_errors": llm_errors[:3],
         "verdict_of": lambda r: r.verdict,
     }
 
 
 def recompute(report: ReviewReport, findings: list[ReviewFinding]) -> ReportVerdict:
     return verdict_of(findings)
+
+
+async def review_materials(
+    user_id: uuid.UUID,
+    material_ids: list[uuid.UUID],
+    *,
+    mode: str | None = None,
+    run_id: uuid.UUID | None = None,
+) -> dict:
+    """★ 异步任务的入口：按素材 ID 检查，返回**可 JSON 序列化**的结果。
+
+    为什么单独包一层：`run_review` 返回的是 ORM 对象与 lambda，arq 存不了 job result。
+    这里开自己的 session（worker 进程没有请求上下文），并把结果转成纯 dict。
+    """
+    from app.core.database import SessionLocal
+    from app.repositories.annotation_repo import AnnotationRepository
+
+    async with SessionLocal() as session:
+        pairs: list[tuple[Material, Annotation]] = []
+        for mid in material_ids:
+            material = await session.get(Material, mid)
+            if material is None or material.user_id != user_id or material.deleted_at is not None:
+                continue
+            ann = await AnnotationRepository(session).get_by_material(mid)
+            if ann is None:
+                continue
+            pairs.append((material, ann))
+
+        existing_run = await session.get(AgentRun, run_id) if run_id else None
+
+        if not pairs:
+            # 没有可检查的内容：把 run 收尾，避免它永远停在 queued（僵尸 run）
+            if existing_run is not None:
+                existing_run.status = RunStatus.succeeded
+                existing_run.finished_at = datetime.now()
+                existing_run.output = {"reports": 0, "reason": "no_checkable_annotations"}
+                await session.commit()
+            return {
+                "run_id": str(run_id) if run_id else None,
+                "reports": [],
+                "skipped_material_ids": [str(m) for m in material_ids],
+                "mode": mode or settings.REVIEW_MODE,
+                "cache_hits": 0,
+                "budget_exceeded": False,
+                "token_total": 0,
+                "llm_errors": [],
+            }
+
+        result = await run_review(session, user_id, pairs, mode=mode, run=existing_run)
+        reports = result["reports"]
+        by_report: dict[uuid.UUID, list[ReviewFinding]] = {}
+        for r in reports:
+            by_report[r.id] = await ReviewRepository(session).findings_of(r.id)
+
+        return {
+            "run_id": str(result["run_id"]),
+            "mode": result["mode"],
+            "cache_hits": result["cache_hits"],
+            "budget_exceeded": result["budget_exceeded"],
+            "token_total": result["token_total"],
+            "llm_errors": result["llm_errors"],
+            "skipped_material_ids": [str(x) for x in result["skipped_material_ids"]],
+            "reports": [
+                {
+                    "id": str(r.id),
+                    "annotation_id": str(r.annotation_id),
+                    "verdict": r.verdict.value,
+                    "summary": r.summary,
+                    "findings_count": r.findings_count,
+                    "mode": r.mode,
+                    "prompt_version": r.prompt_version,
+                    "model": r.model,
+                    "findings": [
+                        {
+                            "track": f.track.value,
+                            "severity": f.severity.value,
+                            "quote": f.quote,
+                            "message": f.message,
+                            "confidence": float(f.confidence) if f.confidence is not None else None,
+                            "rule_code": f.rule_code,
+                        }
+                        for f in by_report.get(r.id, [])
+                    ],
+                }
+                for r in reports
+            ],
+        }
 
 
 __all__ = [

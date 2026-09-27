@@ -91,6 +91,14 @@ class ReviewReport(UUIDPkMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_review_reports_annotation", "annotation_id", "created_at"),
         Index("ix_review_reports_user", "user_id", "created_at"),
+        # 缓存查询：同一「点评版本 + 提示词版本」是否已有报告可复用（见 §B1-6）。
+        # ★ 不是唯一索引 —— 报告保留历史，缓存命中由应用层判断而非数据库约束。
+        Index(
+            "ix_review_reports_cache",
+            "annotation_id",
+            "annotation_version_no",
+            "prompt_version",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -108,6 +116,13 @@ class ReviewReport(UUIDPkMixin, TimestampMixin, Base):
     )
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     findings_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # ★ 以下三个为「接上模型」后必须可追溯的元信息（docs/01 §4.2 C）：
+    #   mode：rules（规则版）/ llm（模型版）/ hybrid（规则保底 + 模型增强）
+    #   prompt_version：改了 prompt 必须让报告缓存失效，否则永远命中旧结论
+    #   model：实际使用的档位，便于复现与成本归因
+    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="rules")
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ReviewFinding(UUIDPkMixin, TimestampMixin, Base):
@@ -117,6 +132,8 @@ class ReviewFinding(UUIDPkMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_review_findings_report", "report_id", "severity"),
         Index("ix_review_findings_open", "status", postgresql_where=OPEN_FINDINGS),
+        Index("ix_review_findings_claim", "claim_id"),
+        Index("ix_review_findings_rule", "rule_code"),
     )
 
     report_id: Mapped[uuid.UUID] = mapped_column(
@@ -135,6 +152,15 @@ class ReviewFinding(UUIDPkMixin, TimestampMixin, Base):
     quote: Mapped[str | None] = mapped_column(Text, nullable=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ★ 接上模型后新增的三个溯源字段：
+    #   rule_code：命中的红线规则码（compliance 轨），便于统计哪条规则最常命中
+    #   claim_id：回指 fact_card_claims，让 finding 能追到事实基线的哪条断言
+    #   confidence：模型置信度，三轨用不同阈值过滤（fact 要高、compliance 要低）
+    rule_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("fact_card_claims.id", ondelete="SET NULL"), nullable=True
+    )
+    confidence: Mapped[float | None] = mapped_column(Numeric(3, 2), nullable=True)
     evidence: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
