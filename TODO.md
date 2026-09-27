@@ -240,7 +240,7 @@ uv run python scripts/compare_sources.py --srcs sina,eastmoney --hours 24
 | D18 | **新浪 / 华尔街见闻的 `title` 恒为 None** → `external_id`（含 title）退化，同一秒多条快讯幂等键撞车 | `title_from_content()`：从正文取首句兜底，且在**算幂等键之前**补全 |
 | D19 | `can't compare offset-naive and offset-aware datetimes`：调用方窗口是 naive、来源游标是 aware | 连接器入口 `ensure_tz()` 统一时区 |
 | D20 | **`source_refs` 追加不幂等**：同一来源每次同步都再追加，实测长度达 25/39，让「另有 N 家报道」失真 | 改为按**来源名**判重后追加；存量用 `--clean-refs` 清理（已处理 5988 条，均值 2.38） |
-| D21 | 同步锁 TTL 3600s 过长：进程崩溃后 1 小时内无法重跑（本次已遇到） | **待修**：建议降到 1800s，或改为"心跳续约 + 异常即释放" |
+| D21 | 同步锁 TTL 3600s 过长：进程崩溃后 1 小时内无法重跑（本次已遇到，只能手动 `redis-cli del`） | ✅ **已修（2026-09-27）**：改为**短 TTL（300s）+ 心跳续约** —— 崩溃后最多 5 分钟自动可重跑，长任务由心跳每 TTL/3 续期不会丢锁；并用唯一 token 保证只有持有者能释放（否则 A 超时后的一次释放会删掉 B 的锁）。`app/core/redis.py::SyncLock`，6 条测试覆盖崩溃恢复与续约 |
 
 > 存量仍有极个别异常条目（`max 39`，历史无名来源堆积）；新数据已幂等，不影响。
 

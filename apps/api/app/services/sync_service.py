@@ -12,7 +12,7 @@ import structlog
 
 from app.connectors.registry import migration_hint
 from app.core.database import SessionLocal
-from app.core.redis import acquire_lock, release_lock
+from app.core.redis import SyncLock
 from app.models.enums import SyncStatus
 from app.repositories.ingest_repo import ConnectorRepository, SyncRunRepository
 from app.repositories.market_repo import MarketFactRepository
@@ -58,8 +58,10 @@ async def run_sync(
     cron_minutes: int = 30,
 ) -> dict:
     """执行一次同步。返回统计字典；失败时抛异常由调用方处理。"""
-    lock_key = f"nda:sync:lock:{connector_id}"
-    if not await acquire_lock(lock_key):
+    # ★ 短 TTL + 心跳续约（D21）：进程崩溃后最多等 SYNC_LOCK_TTL 即可重跑，
+    #   而全量回填这类长任务由心跳持续续期，不会中途丢锁。
+    lock = SyncLock(f"nda:sync:lock:{connector_id}")
+    if not await lock.acquire():
         log.warning("sync.skipped", connector_id=str(connector_id), reason="already_running")
         return {"status": "skipped", "reason": "already_running"}
 
@@ -182,7 +184,7 @@ async def run_sync(
             log.info("sync.finished", connector_id=str(connector_id), **stats)
             return stats
     finally:
-        await release_lock(lock_key)
+        await lock.release()
 
 
 async def sync_due_connectors() -> list[dict]:

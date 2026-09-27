@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     # 粗筛候选上限（同 bucket 内），控制单次入库的计算量
     DEDUPE_CANDIDATE_LIMIT: int = 200
 
+    # 同步锁 TTL（秒）。★ 配合心跳续约（SyncLock）所以能设短：
+    #   进程崩溃后最多等 300s 即可重跑（原 3600s 要等 1 小时，D21）；
+    #   正常运行中由心跳每 TTL/3 续期，全量回填这类长任务不会中途丢锁。
+    SYNC_LOCK_TTL: int = 300
+
     # 同步
     SYNC_MAX_CONCURRENT_CONNECTORS: int = 2
     # 单批检查并发上限（其余排队），避免同时打满 LLM
