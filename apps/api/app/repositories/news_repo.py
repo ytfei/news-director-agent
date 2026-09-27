@@ -10,17 +10,42 @@ import json
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import Select, cast, func, select, text
-from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy import Select, func, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connectors.base import NormalizedItem
-from app.lib.hash import content_hash, hamming_distance, payload_hash, simhash64
+from app.core.config import settings
+from app.lib.dedupe import (
+    EventCandidate,
+    dedupe_text,
+    event_score,
+    jaccard_from_signatures,
+    minhash_bucket,
+    minhash_signature,
+    normalize_text,
+    shingles,
+)
+from app.lib.hash import content_hash, payload_hash, simhash64
 from app.models.ingest import RawDocument
-from app.models.news import NewsCluster, NewsItem, NewsItemRelation, NewsItemSymbol
+from app.models.news import NewsCluster, NewsItem, NewsItemSymbol
 
 SIMHASH_WINDOW = timedelta(days=7)
 SIMHASH_MAX_DISTANCE = 3
+
+
+def _entity_names(entities) -> list[str]:
+    """entities 是 [{name,type,code}]，也可能直接是字符串列表。"""
+    if not entities:
+        return []
+    out: list[str] = []
+    for e in entities:
+        if isinstance(e, dict):
+            if e.get("name"):
+                out.append(str(e["name"]))
+        elif isinstance(e, str):
+            out.append(e)
+    return out
 
 
 def _source_ref(connector_id: uuid.UUID, draft: NormalizedItem) -> dict:
@@ -109,8 +134,19 @@ class NewsRepository:
 
         # ★ title 可空：数值型条目没有标题，统一走 display_title 兜底（列是 NOT NULL）
         title = draft.display_title
+        # content_hash 保持原语义（完全相同才命中），改写稿交给 L3 的 MinHash，
+        # 这样存量 15982 条的 hash 不会失配。
         chash = content_hash(title, draft.content)
         shash = simhash64(f"{title}\n{draft.content or ''}")
+        # L3 转载判定：3-gram shingle 的 MinHash，对渠道改写鲁棒
+        sig = minhash_signature(shingles(dedupe_text(title, draft.content)))
+        bucket = minhash_bucket(sig)
+
+        # ---- L3 转载：命中则不新增条目，只登记来源 ----
+        dup_of = await self._find_duplicate(draft, sig, bucket)
+        if dup_of is not None:
+            await self._register_duplicate(dup_of, connector_id, draft)
+            return dup_of, False
 
         values = {
             "raw_document_id": raw_document_id,
@@ -128,6 +164,9 @@ class NewsRepository:
             "lang": draft.lang,
             "content_hash": chash,
             "simhash": shash,
+            "normalized_title": normalize_text(title)[:500],
+            "minhash": sig,
+            "minhash_bucket": bucket,
             "market_scope": draft.market_scope,
             "industries": draft.industries,
             "entities": draft.entities,
@@ -140,23 +179,22 @@ class NewsRepository:
             .values(**values)
             .on_conflict_do_update(
                 constraint="uq_news_items_content_hash",
-                # ★ 追加来源，绝不清空或丢弃
-                #   asyncpg 不能直接绑 list 给 jsonb，必须序列化后 CAST
-                set_={
-                    "source_refs": NewsItem.source_refs.op("||")(
-                        cast(json.dumps(values["source_refs"]), JSONB)
-                    ),
-                    "updated_at": func.now(),
-                },
+                # 命中已有条目时**不在这里追加来源**：追加必须幂等（见 _append_source_ref），
+                # 而 ON CONFLICT 的 SET 里做"不存在才追加"既难写又难测。
+                set_={"updated_at": func.now()},
             )
             .returning(NewsItem.id, text("(xmax = 0) AS inserted"))
         )
         row = (await self.session.execute(stmt)).one()
         news_id, inserted = row[0], bool(row[1])
 
+        if not inserted:
+            # ★ 命中已有条目（完全相同的稿子）：幂等登记来源，绝不清空或丢弃
+            await self._append_source_ref(news_id, _source_ref(connector_id, draft))
+
         if inserted:
             await self._attach_symbols(news_id, draft)
-            await self._assign_cluster(news_id, draft, shash)
+            await self._assign_cluster(news_id, draft)
 
         return news_id, inserted
 
@@ -169,38 +207,134 @@ class NewsRepository:
             )
             await self.session.execute(stmt)
 
-    async def _assign_cluster(
-        self, news_id: uuid.UUID, draft: NormalizedItem, shash: int
-    ) -> None:
-        """规则版归簇（M1）：7 天内 simhash 汉明距离 <= 3 视为同一事件。
+    async def _find_duplicate(
+        self, draft: NormalizedItem, sig: bytes, bucket: int
+    ) -> uuid.UUID | None:
+        """L3 转载判定：同 bucket 内，MinHash Jaccard ≥ 阈值视为"同一篇的不同转载"。
 
-        ScoutAgent 上线后替换为模型判定；表结构不变。
+        精确率优先 —— 误合并会丢掉一条独立报道。
+        bucket 是简化 LSH：只比同桶候选，避免和窗口内全部条目算 Jaccard。
         """
-        candidates = (
+        since = draft.published_at - timedelta(days=settings.DEDUPE_WINDOW_DAYS)
+        rows = (
             await self.session.execute(
-                select(NewsItem.id, NewsItem.simhash, NewsItem.cluster_id).where(
-                    NewsItem.published_at >= draft.published_at - SIMHASH_WINDOW,
-                    NewsItem.id != news_id,
-                    NewsItem.simhash.is_not(None),
+                select(NewsItem.id, NewsItem.minhash)
+                .where(
+                    NewsItem.minhash_bucket == bucket,
+                    NewsItem.published_at >= since,
+                    NewsItem.deleted_at.is_(None),
                 )
+                .limit(settings.DEDUPE_CANDIDATE_LIMIT)
             )
         ).all()
 
-        cluster_id: uuid.UUID | None = None
-        for cid, other_simhash, existing_cluster in candidates:
-            if other_simhash is None:
+        best_id: uuid.UUID | None = None
+        best_score = 0.0
+        for rid, rminhash in rows:
+            if not rminhash:
                 continue
-            if hamming_distance(int(shash), int(other_simhash)) <= SIMHASH_MAX_DISTANCE:
-                cluster_id = existing_cluster
-                # 记录 duplicate 关系，供"另有 N 家报道"展示
-                if cid != news_id:
-                    await self.session.execute(
-                        insert(NewsItemRelation)
-                        .values(from_news_id=news_id, to_news_id=cid, relation="duplicate")
-                        .on_conflict_do_nothing(constraint="uq_news_item_relations")
-                    )
-                break
+            score = jaccard_from_signatures(sig, bytes(rminhash))
+            if score >= settings.DUP_JACCARD_THRESHOLD and score > best_score:
+                best_id, best_score = rid, score
+        return best_id
 
+    async def _append_source_ref(self, news_id: uuid.UUID, ref: dict) -> None:
+        """幂等登记来源。
+
+        ★ 直接 `source_refs || 新来源` 是不幂等的：同一个来源每次同步都会再追加一条，
+        实测出现过 `source_refs` 长度 25 的条目，让「另有 N 家报道」彻底失真。
+        这里按 (connector_id, external_id) 判重 —— 相同来源只登记一次。
+        """
+        await self.session.execute(
+            text(
+                "UPDATE news_items SET source_refs = source_refs || CAST(:ref AS jsonb) "
+                "WHERE id = :id AND NOT EXISTS ("
+                "  SELECT 1 FROM jsonb_array_elements(source_refs) x "
+                "  WHERE x->>'connector_id' = :cid AND x->>'external_id' = :eid"
+                ")"
+            ),
+            {
+                "id": news_id,
+                "ref": json.dumps([ref]),
+                "cid": str(ref.get("connector_id") or ""),
+                "eid": str(ref.get("external_id") or ""),
+            },
+        )
+
+    async def _register_duplicate(
+        self, existing_id: uuid.UUID, connector_id: uuid.UUID, draft: NormalizedItem
+    ) -> None:
+        """转载：不新增条目，只登记来源 + 累加 duplicate_count。"""
+        await self._append_source_ref(existing_id, _source_ref(connector_id, draft))
+        cid = (
+            await self.session.execute(
+                select(NewsItem.cluster_id).where(NewsItem.id == existing_id)
+            )
+        ).scalar_one_or_none()
+        if cid:
+            await self.session.execute(
+                text("UPDATE news_clusters SET duplicate_count = duplicate_count + 1 WHERE id = :id"),
+                {"id": cid},
+            )
+
+    async def _assign_cluster(self, news_id: uuid.UUID, draft: NormalizedItem) -> None:
+        """L4 事件聚类：同事件的不同角度报道 → 同一簇，**各条都保留**。
+
+        与 L3 的区别：L3 是"同一篇稿子的转载"（合并展示，只留一条）；
+        L4 是"同一事件的不同报道"（都要留着 —— 信息互补，正是交叉验证的素材）。
+
+        只与**簇代表**比较而不是簇内所有条目：这是性能关键，
+        否则每次入库都要和窗口内全部条目算分。
+        """
+        since = draft.published_at - timedelta(hours=settings.EVENT_WINDOW_HOURS)
+        reps = (
+            await self.session.execute(
+                select(
+                    NewsItem.id,
+                    NewsItem.cluster_id,
+                    NewsItem.title,
+                    NewsItem.entities,
+                    NewsItem.keywords,
+                    NewsItem.published_at,
+                    NewsItem.embedding,
+                )
+                .where(
+                    NewsItem.is_cluster_rep.is_(True),
+                    NewsItem.published_at >= since,
+                    NewsItem.id != news_id,
+                    NewsItem.cluster_id.is_not(None),
+                    NewsItem.deleted_at.is_(None),
+                )
+                .limit(1000)
+            )
+        ).all()
+
+        # 不同 connector 的 NormalizedItem 字段可能不齐（如数值事实没有 keywords），
+        # 一律用 getattr 安全取，避免"接了新数据源就崩"
+        cand = EventCandidate.from_item(
+            draft.display_title,
+            entities=_entity_names(getattr(draft, "entities", None)),
+            keywords=getattr(draft, "keywords", None),
+            published_at=draft.published_at,
+        )
+
+        cluster_id: uuid.UUID | None = None
+        best_score = 0.0
+        for _rid, cid, rtitle, ents, kws, ts, emb in reps:
+            other = EventCandidate.from_item(
+                rtitle,
+                entities=_entity_names(ents),
+                keywords=kws,
+                published_at=ts,
+                embedding=emb,
+            )
+            score, _parts = event_score(
+                cand, other, window_hours=settings.EVENT_WINDOW_HOURS
+            )
+            if score >= settings.EVENT_SCORE_THRESHOLD and score > best_score:
+                cluster_id, best_score = cid, score
+
+        is_rep = False
         if cluster_id is None:
             cluster = NewsCluster(
                 title=draft.display_title[:200],
@@ -212,6 +346,7 @@ class NewsRepository:
             self.session.add(cluster)
             await self.session.flush()
             cluster_id = cluster.id
+            is_rep = True
         else:
             await self.session.execute(
                 text(
@@ -222,8 +357,10 @@ class NewsRepository:
             )
 
         await self.session.execute(
-            text("UPDATE news_items SET cluster_id = :cid WHERE id = :id"),
-            {"cid": cluster_id, "id": news_id},
+            text(
+                "UPDATE news_items SET cluster_id = :cid, is_cluster_rep = :rep WHERE id = :id"
+            ),
+            {"cid": cluster_id, "rep": is_rep, "id": news_id},
         )
         await self._refresh_source_count(cluster_id)
 
@@ -242,13 +379,7 @@ class NewsRepository:
     ) -> None:
         """跨源命中：登记来源并刷新簇的 source_count。"""
         if draft is not None:
-            ref = json.dumps([_source_ref(connector_id, draft)])
-            await self.session.execute(
-                text(
-                    "UPDATE news_items SET source_refs = source_refs || CAST(:ref AS jsonb) WHERE id = :id"
-                ),
-                {"id": news_id, "ref": ref},
-            )
+            await self._append_source_ref(news_id, _source_ref(connector_id, draft))
         row = (
             await self.session.execute(
                 select(NewsItem.cluster_id).where(NewsItem.id == news_id)

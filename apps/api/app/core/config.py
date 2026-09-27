@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     # 若需要建向量索引，可设 ≤2000（对所有向量统一截断，余弦相似度仍可用但精度下降）
     EMBEDDING_TRUNCATE_TO: int = 0
 
+    # ---- 去重与归簇（分层：精确 / 转载 / 事件，见 app/lib/dedupe.py）----
+    # L3 转载判定：精确率优先（误合并会丢掉一条独立报道），阈值偏高
+    DUP_JACCARD_THRESHOLD: float = 0.75
+    DEDUPE_WINDOW_DAYS: int = 7
+    # L4 事件聚类：召回优先（漏了就失去交叉验证），阈值偏低。
+    # ★ 0.32 是"当前特征不全"下的起点：库里 entities/keywords 全空、embedding 几乎没有，
+    #   实际只有"标题重合 + 时间"两个信号，标题相似度 ≈0.43 才能过线。
+    #   补上实体抽取与 embedding 后需**用标注集重新标定**（见 TODO P1）。
+    EVENT_SCORE_THRESHOLD: float = 0.32
+    EVENT_WINDOW_HOURS: float = 72.0
+    # 粗筛候选上限（同 bucket 内），控制单次入库的计算量
+    DEDUPE_CANDIDATE_LIMIT: int = 200
+
     # 同步
     SYNC_MAX_CONCURRENT_CONNECTORS: int = 2
     # 单批检查并发上限（其余排队），避免同时打满 LLM

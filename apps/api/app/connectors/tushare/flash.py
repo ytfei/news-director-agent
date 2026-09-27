@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -46,6 +47,45 @@ from app.models.enums import ContentType
 log = structlog.get_logger()
 
 API = "news"
+
+# 正文里"【标题】"这类前缀（东方财富常见），提标题时先剥掉
+_BRACKET_PREFIX = re.compile(r"^\s*【[^】]{1,40}】\s*")
+_SENTENCE_ENDS = ("。", "！", "？", "\n", "；")
+TITLE_FALLBACK_LIMIT = 80
+
+
+def ensure_tz(dt: datetime) -> datetime:
+    """★ 统一为带时区。
+
+    调用方（sync_service）传的窗口可能是 naive，而来源游标（`parse_time`）是 aware，
+    两者一比较就 `TypeError: can't compare offset-naive and offset-aware datetimes`。
+    在连接器入口统一，而不是要求每个调用方都做对。
+    """
+    return dt if dt.tzinfo else dt.replace(tzinfo=ZoneInfo(DEFAULT_TZ))
+
+
+def title_from_content(content: str | None, limit: int = TITLE_FALLBACK_LIMIT) -> str:
+    """★ 部分来源（新浪财经、华尔街见闻）的 `title` 恒为 None，正文就是一句话新闻。
+
+    实测 12 小时窗口：新浪 160 条标题填充率 **0%**、华尔街见闻 72%、金融界 63%。
+    若不兜底会有两个后果：
+    1. `external_id` = [channel, datetime, title] 退化为 [channel, datetime, ""]，
+       同一秒的多条快讯**幂等键撞车**，互相覆盖；
+    2. `news_items.title` 是 NOT NULL，只能落到无意义的兜底值。
+    """
+    text = (content or "").strip()
+    if not text:
+        return ""
+    stripped = _BRACKET_PREFIX.sub("", text).strip()
+    if stripped:
+        text = stripped
+    for sep in _SENTENCE_ENDS:
+        idx = text.find(sep)
+        if idx > 0:
+            return text[: idx + 1][:limit]
+    return text[:limit]
+
+
 FLASH_WINDOW = timedelta(hours=1)  # 单段窗口：1500 条上限下，一小时足够安全
 MAX_SPLIT_DEPTH = 4  # 触顶后最多细分 4 层（1h → 3.75min）
 MAX_LOOKBACK = timedelta(days=7)  # 单次拉取跨度上限，防止配额被一次烧穿
@@ -70,7 +110,10 @@ class TushareFlashConnector(TushareBase):
                 type="multiselect",
                 required=True,
                 options=[{"value": k, "label": v} for k, v in SRC_LABELS.items()],
-                default=["cls", "sina"],
+                # 三个主力源（新浪 / 华尔街见闻 / 东方财富）+ 财联社。
+                # 实测 12h 窗口条数：新浪 160 · 东方财富 91 · 金融界 49 · 同花顺 48 ·
+                # 华尔街见闻 46 · 第一财经 34 · 财联社 6 · 云财经/凤凰 0。
+                default=["sina", "wallstreetcn", "eastmoney", "cls"],
                 help="可多选。每个来源独立限流、独立续拉；某个来源失败不影响其他来源。",
             ),
         ],
@@ -235,7 +278,7 @@ class TushareFlashConnector(TushareBase):
         if not self.token or not self.srcs:
             return
 
-        start, end = window
+        start, end = ensure_tz(window[0]), ensure_tz(window[1])
         floor = end - MAX_LOOKBACK
 
         for src in self.srcs:
@@ -307,6 +350,13 @@ class TushareFlashConnector(TushareBase):
             )
 
         for row in rows:
+            # ★ 先把缺失的 title 从正文补出来，再算幂等键：
+            #   否则同一秒的多条新浪快讯会因为 title 为空而撞键互相覆盖
+            row = dict(row)
+            if not str(row.get("title") or "").strip():
+                row["title"] = title_from_content(
+                    row.get("content") or row.get("text")
+                )
             # 幂等键与 normalize 用同一套规则，保证 ODS 与 DWD 对"同一条"的判断一致
             external_id = NEWS_SPEC.build_external_id(row, {"channel": src})
             yield RawItem(

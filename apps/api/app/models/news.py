@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -81,6 +82,9 @@ class NewsCluster(UUIDPkMixin, TimestampMixin, Base):
     member_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     # 多少家媒体报道 → 交叉验证强度。★ 由跨源登记维护，不能因去重丢失（05 §4.9）
     source_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # ★ 与 member_count 区分：member_count = 簇内**独立报道**数（不同角度，都要保留）；
+    #   duplicate_count = 被判定为"同一篇转载"的条数（合并展示，不单独出现）
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     importance: Mapped[float | None] = mapped_column(Numeric(3, 2), nullable=True)
@@ -144,9 +148,14 @@ class NewsItem(UUIDPkMixin, TimestampMixin, SoftDeleteMixin, Base):
     )
     lang: Mapped[str] = mapped_column(Text, nullable=False, server_default="zh")
 
-    # 去重：content_hash 精确 + simhash 近似
+    # 去重：L2 content_hash（精确）+ L3 MinHash（转载，见 app/lib/dedupe.py）
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     simhash: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 归一化后的标题（去来源前缀/全半角/标点）—— 用于可比性与展示
+    normalized_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # MinHash 签名（64×uint64）+ 简化 LSH 桶，用于转载判定
+    minhash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    minhash_bucket: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # ★ 跨源重复来源：[{connector_id, external_id, source_name, url, raw_document_id}]
     source_refs: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
