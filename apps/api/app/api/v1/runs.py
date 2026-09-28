@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user_id, get_session
@@ -52,9 +53,21 @@ async def get_run(
     }
 
 
+class ResumeIn(BaseModel):
+    """恢复断点时的可选修改。
+
+    ★ 大纲可编辑是产品要求（docs/03 §4）：用户确认大纲时常常要改标题或段落。
+    不改就传空，后端沿用断点里的原大纲。
+    """
+
+    outline: dict | None = None
+    title: str | None = None
+
+
 @router.post("/{run_id}/resume", status_code=202)
 async def resume_run(
     run_id: uuid.UUID,
+    payload: ResumeIn | None = None,
     sync: bool = False,
     session: AsyncSession = Depends(get_session),
     user_id: uuid.UUID = Depends(current_user_id),
@@ -73,6 +86,12 @@ async def resume_run(
         )
     if run.status != RunStatus.waiting_human:
         raise HTTPException(status_code=409, detail=f"run 状态为 {run.status.value}，不是等待人工")
+
+    # ★ 用户改了大纲：写回断点再恢复。worker 续跑时从 interrupt_payload 读，
+    #   所以不必给任务多传参数（保持 job 签名稳定，也便于断点续跑）。
+    if payload is not None and payload.outline:
+        run.interrupt_payload = {**(run.interrupt_payload or {}), "outline": payload.outline}
+        await session.commit()
 
     job_id = await enqueue_job("compose_resume", str(user_id), str(run_id))
 

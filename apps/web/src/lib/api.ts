@@ -289,6 +289,102 @@ export interface ProjectDetail {
   assessment: Assessment
 }
 
+// ---------------- 写作 / run（M3） ----------------
+
+export interface OutlineSection {
+  heading: string
+  key_points: string[]
+  material_refs: number[]
+  target_words: number
+}
+
+export interface Outline {
+  title_candidates: string[]
+  sections: OutlineSection[]
+}
+
+/** WriterAgent 的真实输入。写作台展示它，是为了让用户知道 AI 究竟拿了什么去写。 */
+export interface ComposeBrief {
+  project_id: string
+  title: string
+  mode: 'opinion' | 'digest'
+  platform: string | null
+  target_words: number
+  annotations: { news_title: string | null; body: string }[]
+  materials: {
+    id: string
+    title: string | null
+    source_name: string | null
+    summary: string | null
+    content: string | null
+  }[]
+  prompts: { name: string; description: string | null; category: string }[]
+}
+
+export type RunStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_human'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+
+export interface AgentRun {
+  run_id: string
+  graph: string
+  status: RunStatus
+  model: string | null
+  token_input: number
+  token_output: number
+  input: Record<string, unknown>
+  output: Record<string, unknown>
+  /** 中断点数据：compose 停在 waiting_human 时这里是大纲与 brief */
+  interrupt_payload: { outline?: Outline; brief?: ComposeBrief } | null
+  error_message: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface ComposeResult {
+  run_id: string
+  status: RunStatus
+  mode?: string
+  job_id?: string
+  async?: boolean
+  note?: string
+  /** sync 模式下直接返回大纲 */
+  outline?: Outline
+  /** sync 模式续写后直接返回稿件 */
+  article_id?: string
+  title?: string
+  word_count?: number
+  sections?: number
+  error?: string
+}
+
+export interface ArticleSummary {
+  id: string
+  title: string
+  status: string
+  project_id: string | null
+  platform: string | null
+  current_version_no: number
+  word_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ArticleDetail extends ArticleSummary {
+  content: string
+  /** ★ 段落 → 素材映射：可追溯视图的数据基础 */
+  citation_map: {
+    title_candidates?: string[]
+    sections?: Record<string, { heading: string; material_refs: number[] }>
+    brief_mode?: string
+  }
+  versions: { version_no: number; title: string; word_count: number; source: string; created_at: string }[]
+}
+
 // ---------------- 数据源（M1） ----------------
 
 /** 连接器声明的配置项 —— 前端据此**动态渲染**表单，不需要认识任何具体连接器。 */
@@ -546,11 +642,30 @@ export const api = {
   removeProjectMaterial: (id: string, materialId: string) =>
     request<void>(`/projects/${id}/materials/${materialId}`, { method: 'DELETE' }),
 
-  composeProject: (id: string) =>
-    request<{ run_id: string; status: string; mode: string; note: string }>(
-      `/projects/${id}/compose`,
-      { method: 'POST' },
-    ),
+  /**
+   * 触发写作。默认入队（异步，返回 202 + run_id）；
+   * `sync=true` 就地执行 —— 开发机没起 worker 时用，但会阻塞 1~3 分钟。
+   */
+  composeProject: (id: string, sync?: boolean) =>
+    request<ComposeResult>(`/projects/${id}/compose${sync ? '?sync=true' : ''}`, {
+      method: 'POST',
+    }),
+
+  // ---- run（检查与写作共用） ----
+  getRun: (runId: string) => request<AgentRun>(`/runs/${runId}`),
+
+  /** 恢复断点（当前是「确认大纲 → 写正文」）。可传入修改后的大纲。 */
+  resumeRun: (runId: string, outline?: Outline, sync?: boolean) =>
+    request<ComposeResult>(`/runs/${runId}/resume${sync ? '?sync=true' : ''}`, {
+      method: 'POST',
+      body: JSON.stringify(outline ? { outline } : {}),
+    }),
+
+  // ---- 稿件 ----
+  listArticles: (projectId?: string) =>
+    request<ArticleSummary[]>('/articles' + (projectId ? `?project_id=${projectId}` : '')),
+
+  getArticle: (id: string) => request<ArticleDetail>(`/articles/${id}`),
 
   // ---- 提示词 ----
   listPrompts: () => request<PromptTemplate[]>('/prompts'),

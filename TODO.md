@@ -500,8 +500,15 @@ uv run python scripts/compare_sources.py --srcs sina,eastmoney --hours 24
 - [x] `citation_map`：段落 → 素材映射（可追溯视图的数据基础）
 - [x] 24h 僵尸断点清理（cron `cleanup_stale_runs`）
 - [x] 5 项纯逻辑测试，全套 **112 passed**
+- [x] **写作台前端 UI**（2026-09-28）：阶段条（素材→大纲→确认→写作→成稿，由 `run.status` 驱动）、
+      brief 预览、**大纲可编辑**（标题改选 + 段落小标题可改）、成稿渲染 + **段落溯源** +
+      token 消耗展示；runId 存 localStorage（worker 是异步的，刷新不能丢进度）
+- [x] **稿件库前端**：`/articles` 列表 + `/articles/:id` 详情（正文 + 溯源 + 版本历史 + 复制）
+- [x] 后端 `POST /runs/{id}/resume` 支持传修改后的大纲（写回 `interrupt_payload`，
+      worker 续跑时读新大纲，job 签名保持不变）
 
-**未做**：SSE 流式进度、写作台前端 UI、多平台改写、「事实句必须映射到 FactCard」的硬护栏。
+**未做**：SSE 流式进度（当前只能轮询 `GET /runs/{id}`）、多平台改写、
+「事实句必须映射到 FactCard」的硬护栏。
 
 ### 11. 提示词 → Skill 包编译
 - [ ] `prompt_templates` → `SKILL.md` + 结构化约束（禁用词表 / 必含要素 / few-shot）

@@ -1,6 +1,7 @@
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
 import { Toaster } from './components/Toast'
 import { cn } from './components/ui'
+import { ArticlePage, Articles } from './routes/Articles'
 import { Compose } from './routes/Compose'
 import { Connectors } from './routes/Connectors'
 import { Inbox } from './routes/Inbox'
@@ -42,6 +43,7 @@ const NAV: { group: string; level?: string; items: NavItem[] }[] = [
     level: 'L3',
     items: [
       { to: '/projects', label: '选题', icon: '📁' },
+      { to: '/articles', label: '稿件库', icon: '📄' },
       { to: '/prompts', label: '提示词', icon: '💬' },
     ],
   },
@@ -95,7 +97,7 @@ export default function App() {
 
         <div className="border-t border-slate-200 px-4 py-3 text-[11px] text-slate-400">
           M2 · 素材 → 批注 → 体检 → 选题
-          <div className="mt-1">写作台（M3）为占位实现</div>
+          <div className="mt-1">M3 · 写作 → 稿件已通</div>
         </div>
       </nav>
 
@@ -109,6 +111,8 @@ export default function App() {
           <Route path="/reviews/:reportId" element={<Review />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/projects/:id/compose" element={<Compose />} />
+          <Route path="/articles" element={<Articles />} />
+          <Route path="/articles/:id" element={<ArticlePage />} />
           <Route path="/prompts" element={<Prompts />} />
           <Route path="/settings/connectors" element={<Connectors />} />
           <Route path="*" element={<div className="p-10 text-sm text-slate-500">页面不存在</div>} />
