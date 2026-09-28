@@ -18,6 +18,7 @@ from app.models.agent import AgentRun
 from app.models.enums import ProjectStatus, RunGraph, RunStatus
 from app.repositories.project_repo import ProjectRepository, PromptRepository
 from app.services.project_service import ProjectService
+from app.services.queue import enqueue_job
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -158,13 +159,17 @@ async def remove_material(
 @router.post("/{project_id}/compose", status_code=202)
 async def compose_project(
     project_id: uuid.UUID,
+    sync: bool = False,
     session: AsyncSession = Depends(get_session),
     user_id: uuid.UUID = Depends(current_user_id),
 ) -> dict:
-    """触发写作。
+    """触发写作（M3）。
 
-    M2/M3 交界处：此处只做**准入校验**并创建 run（queued）。
-    实际编排由 WriterAgent（LangGraph compose_graph）接管，SSE 推送进度。
+    入队后立刻返回 202 + run_id：
+    - 第一阶段（compose_project）：编译 brief + 生成大纲 → 停在 `waiting_human`
+    - 用户确认大纲后 → `POST /runs/{run_id}/resume` 起新 job 写正文
+
+    ?sync=true 供开发/自测（不启 worker 也能跑通）。
     """
     repo = ProjectRepository(session)
     project = await repo.get(project_id, user_id)
@@ -199,12 +204,23 @@ async def compose_project(
     project.status = ProjectStatus.composing
     await session.commit()
 
+    # ★ M3：入队第一阶段（编译 brief + 生成大纲 → 停在 waiting_human 等确认）。
+    #   Redis 不可用或 ?sync=true 时就地执行，保证开发机也能跑通。
+    job_id = await enqueue_job("compose_project", str(user_id), str(project.id), str(run.id))
+
+    if job_id is None or sync:
+        from app.services.compose_service import plan_phase
+
+        result = await plan_phase(user_id, project.id, run.id)
+        return {**result, "async": False}
+
     return {
         "run_id": run.id,
+        "job_id": job_id,
         "status": run.status.value,
         "mode": assessment["mode"],
-        "note": "compose_graph 尚未接入：当前只完成准入校验与 run 建档" if assessment["mode"] == "digest"
-        else "已入队，等待 compose_graph 接管",
+        "async": True,
+        "note": "已入队：先生成大纲，确认后再写正文",
     }
 
 

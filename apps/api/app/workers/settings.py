@@ -7,6 +7,9 @@ from arq.connections import RedisSettings
 
 from app.core.config import settings
 from app.workers.tasks import (
+    cleanup_stale_runs,
+    compose_project,
+    compose_resume,
     enrich_news_item,
     generate_due_fact_cards,
     generate_fact_card,
@@ -34,6 +37,9 @@ class WorkerSettings:
         generate_fact_card,
         generate_due_fact_cards,
         review_annotations,
+        compose_project,
+        compose_resume,
+        cleanup_stale_runs,
     ]
 
     cron_jobs = [
@@ -42,6 +48,8 @@ class WorkerSettings:
         # 事实基线补生成：每小时限量 10 条。★ 限量是刻意的 ——
         # 全量预生成意味着上万次 LLM 调用，成本会吃掉收入，只为被用到的资讯生成。
         cron(generate_due_fact_cards, minute={15}, run_at_startup=False),
+        # 每天清理一次超时未确认的断点（24h），避免 waiting_human 的 run 永久堆积
+        cron(cleanup_stale_runs, hour={4}, minute={0}, run_at_startup=False),
     ]
 
 

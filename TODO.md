@@ -14,11 +14,11 @@
 | 规格提炼 | 原型 → 需求 / 流程 / 接口 / 表 | ✅ | `docs/06-prototype-to-impl.md` |
 | **M1 数据底座** | 资讯进得来、看得见 | ✅ | tushare 真机同步 + 资讯流 + 收藏评级 |
 | **M2 观点闭环** | 素材 → 批注 → 检查 → 选题 | ✅ 规则版 | 迁移 0003/0004、`/api/v1` 26 条路径、9 个前端页面 |
-| M3 自动写作 | 文章能出 | ⬜ 占位 | `POST /projects/{id}/compose` 只做准入校验 + run 建档 |
+| M3 自动写作 | 文章能出 | 🟡 **核心链路已通**（2026-09-28） | 真机出稿：大纲 4 段 → 中断确认 → 成稿 **1268 字**。缺前端写作台 UI、SSE 流式、多平台改写 |
 | 容器化与部署 | 一条命令起整套 | ✅ | `make up`（web :8080 / api :8000）+ `make doctor` 自检 |
 | M0 假设验证 | 用户愿不愿意先写点评 | ⬜ **未执行（进 M3 前的 Gate）** | — |
 
-**一句话**：现在可以完整走通「挑素材 → 写批注 → 体检 → 建选题 → 触发写作（待接）」，缺的是 Agent 层与写作台。
+**一句话**：可以完整走通「挑素材 → 写批注 → 体检 → 建选题 → 触发写作 → 大纲确认 → 出稿」。Agent 层已接模型（检查 + 写作 + 事实核查），缺的是前端写作台 UI、SSE 流式与 M0 验证。
 
 ---
 
@@ -487,6 +487,21 @@ uv run python scripts/compare_sources.py --srcs sina,eastmoney --hours 24
 ## 5. P2 · M3 自动写作（建议 3 周）
 
 > 前置：M0 Gate 通过 + P0-4 鉴权 + P1-6 收尾完成
+
+**✅ 已完成（2026-09-28，真机出稿 1268 字）**：
+
+- [x] `compose_service`：brief 编译 → 大纲（pro）→ **HITL 中断** → 分段并行写作（turbo）→ 落库
+- [x] **HITL 用 arq + `AgentRun` 状态机实现，未引入 LangGraph / deepagents** ——
+      `deepagents.skills` 参数形态仍是未验证项（Spike #6），不能让它阻塞 M3；
+      而且 docs/04 §5.4 定的规则本来就是「interrupt = job 结束，resume = 新 job」
+- [x] `POST /projects/{id}/compose` **真正入队**（原来只建 run 不入队）
+- [x] `POST /runs/{id}/resume` + `GET /runs/{id}`（通用 run 状态查询）
+- [x] `GET /articles`、`/{id}`、`/{id}/versions/{no}`（稿件库 + 版本对比）
+- [x] `citation_map`：段落 → 素材映射（可追溯视图的数据基础）
+- [x] 24h 僵尸断点清理（cron `cleanup_stale_runs`）
+- [x] 5 项纯逻辑测试，全套 **112 passed**
+
+**未做**：SSE 流式进度、写作台前端 UI、多平台改写、「事实句必须映射到 FactCard」的硬护栏。
 
 ### 11. 提示词 → Skill 包编译
 - [ ] `prompt_templates` → `SKILL.md` + 结构化约束（禁用词表 / 必含要素 / few-shot）

@@ -90,10 +90,68 @@ async def review_annotations(
     )
 
 
+async def compose_project(ctx: dict, user_id: str, project_id: str, run_id: str) -> dict:
+    """★ M3 第一阶段：编译 brief + 生成大纲 → 停在 `waiting_human`。
+
+    docs/04 §5.4：interrupt = job **结束**。本 job 到此返回，
+    用户确认大纲后由 `compose_resume`（新 job）续跑。
+    """
+    from app.services.compose_service import plan_phase
+
+    return await plan_phase(uuid.UUID(user_id), uuid.UUID(project_id), uuid.UUID(run_id))
+
+
+async def compose_resume(ctx: dict, user_id: str, run_id: str) -> dict:
+    """★ M3 第二阶段（新 job）：分段并行写作 → 落库稿件。"""
+    from app.services.compose_service import resume_phase
+
+    return await resume_phase(uuid.UUID(user_id), uuid.UUID(run_id))
+
+
+async def cleanup_stale_runs(ctx: dict, hours: int = 24) -> dict:
+    """★ 清理超时未恢复的断点 run（docs/03 §5：24h 无响应 → cancelled）。
+
+    没有这个，用户触发写作后关掉页面，`waiting_human` 的 run 会永久堆积，
+    一直占着 checkpointer 与配额。
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.core.database import SessionLocal
+    from app.models.agent import AgentRun
+    from app.models.enums import RunStatus
+
+    cutoff = datetime.now() - timedelta(hours=hours)
+    async with SessionLocal() as session:
+        try:
+            result = await session.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.status == RunStatus.waiting_human,
+                    AgentRun.created_at < cutoff,
+                )
+                .values(status=RunStatus.cancelled, finished_at=datetime.now())
+            )
+            cancelled = result.rowcount or 0
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("task.cleanup_failed", error=str(exc)[:200])
+            return {"cancelled": 0, "error": str(exc)[:200]}
+
+    if cancelled:
+        log.info("task.cleanup_stale_runs", cancelled=cancelled, hours=hours)
+    return {"cancelled": cancelled}
+
+
 __all__ = [
     "sync_connector",
     "sync_due",
     "enrich_news_item",
     "generate_fact_card",
+    "generate_due_fact_cards",
     "review_annotations",
+    "compose_project",
+    "compose_resume",
+    "cleanup_stale_runs",
 ]
